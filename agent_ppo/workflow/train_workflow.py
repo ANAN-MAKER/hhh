@@ -94,6 +94,28 @@ class EpisodeRunner:
             done = False
             step = 0
             total_reward = 0.0
+            
+            # 三层奖励统计 (Layer A, B, C)
+            layer_a_total = 0.0  # 主目标层
+            layer_b_total = 0.0  # 引导层
+            layer_c_total = 0.0  # 约束层
+            
+            # A层内部拆分
+            survival_reward_total = 0.0
+            score_objective_total = 0.0
+            
+            # B层内部拆分
+            distance_shaping_total = 0.0
+            danger_zone_penalty_total = 0.0
+            buff_bonus_total = 0.0
+            flash_escape_bonus_total = 0.0
+            
+            # C层内部拆分
+            movement_penalty_total = 0.0
+            loop_penalty_total = 0.0
+            wasteful_flash_penalty_total = 0.0
+            
+            # 其他统计
             exploration_bonus = 0.0
             anti_loiter_penalty = 0.0
             treasure_bonus = 0.0
@@ -130,6 +152,28 @@ class EpisodeRunner:
                 reward = np.array(_remain_info.get("reward", [0.0]), dtype=np.float32)
                 reward_info = _remain_info.get("reward_info", {})
                 total_reward += float(reward[0])
+                
+                # 统计三层奖励
+                layer_a_total += float(reward_info.get("layer_a", 0.0))
+                layer_b_total += float(reward_info.get("layer_b", 0.0))
+                layer_c_total += float(reward_info.get("layer_c", 0.0))
+                
+                # A层内部拆分
+                survival_reward_total += float(reward_info.get("survival_reward", 0.0))
+                score_objective_total += float(reward_info.get("score_objective", 0.0))
+                
+                # B层内部拆分
+                distance_shaping_total += float(reward_info.get("distance_shaping", 0.0))
+                danger_zone_penalty_total += float(reward_info.get("danger_zone_penalty", 0.0))
+                buff_bonus_total += float(reward_info.get("buff_bonus", 0.0))
+                flash_escape_bonus_total += float(reward_info.get("flash_escape_bonus", 0.0))
+                
+                # C层内部拆分
+                movement_penalty_total += float(reward_info.get("movement_penalty", 0.0))
+                loop_penalty_total += float(reward_info.get("loop_penalty", 0.0))
+                wasteful_flash_penalty_total += float(reward_info.get("wasteful_flash_penalty", 0.0))
+                
+                # 其他统计（向后兼容）
                 exploration_bonus += float(reward_info.get("exploration_reward", 0.0))
                 anti_loiter_penalty += float(reward_info.get("loiter_penalty", 0.0))
                 treasure_bonus += float(reward_info.get("treasure_pickup_reward", 0.0))
@@ -198,6 +242,7 @@ class EpisodeRunner:
                     if now - self.last_report_monitor_time >= 60 and self.monitor:
                         avg_divisor = max(step, 1)
                         monitor_data = {
+                            # 基础统计
                             "episode_reward": round(total_reward + float(final_reward[0]), 4),
                             "episode_steps": step,
                             "episode_score": round(total_score, 4),
@@ -207,11 +252,35 @@ class EpisodeRunner:
                             "episode_buff_count": collected_buff,
                             "episode_flash_count": flash_count,
                             "win_flag": round(win_flag, 4),
+                            
+                            # 三层奖励拆分
+                            "layer_a_total": round(layer_a_total, 4),  # 主目标层总奖励
+                            "layer_b_total": round(layer_b_total, 4),  # 引导层总奖励
+                            "layer_c_total": round(layer_c_total, 4),  # 约束层总奖励
+                            
+                            # A层内部
+                            "survival_reward_total": round(survival_reward_total, 4),
+                            "score_objective_total": round(score_objective_total, 4),
+                            
+                            # B层内部
+                            "distance_shaping_total": round(distance_shaping_total, 4),
+                            "danger_zone_penalty_total": round(danger_zone_penalty_total, 4),
+                            "buff_bonus_total": round(buff_bonus_total, 4),
+                            "flash_escape_bonus_total": round(flash_escape_bonus_total, 4),
+                            
+                            # C层内部
+                            "movement_penalty_total": round(movement_penalty_total, 4),
+                            "loop_penalty_total": round(loop_penalty_total, 4),
+                            "wasteful_flash_penalty_total": round(wasteful_flash_penalty_total, 4),
+                            
+                            # 平均值
                             "avg_step_reward": round(total_reward / avg_divisor, 4),
                             "avg_move_dist": round(total_move_dist / avg_divisor, 4),
                             "avg_min_monster_dist": round(total_min_monster_dist / avg_divisor, 4),
                             "avg_nearest_treasure_dist": round(total_nearest_treasure_dist / avg_divisor, 4),
                             "avg_stuck_score": round(total_stuck_score / avg_divisor, 4),
+                            
+                            # 向后兼容的奖励项
                             "exploration_bonus": round(exploration_bonus, 4),
                             "anti_loiter_penalty": round(anti_loiter_penalty, 4),
                             "treasure_bonus": round(treasure_bonus, 4),

@@ -154,6 +154,10 @@ class Preprocessor:
         self.reward_history = deque(maxlen=15)  # 奖励历史
         self.danger_trend = deque(maxlen=5)  # 危险趋势窗口
         self.exploration_history = Counter()  # 探索记忆
+        
+        # Action quality evaluation related
+        self.hero_max_hp = 100.0  # 默认最大血量（会在feature_process中更新）
+        self.danger_trend_value = 0.0  # 当前危险趋势值
 
     def _extract_legal_action(self, observation):
         legal_act_raw = observation.get("legal_action", observation.get("legal_act", []))
@@ -518,6 +522,15 @@ class Preprocessor:
         self.monster_dist_history.append(cur_min_monster_dist_norm)
         self.treasure_dist_history.append(nearest_treasure_dist_norm)
         self.reward_history.append(reward_info.get("reward_total", 0.0))
+        
+        # 更新危险趋势指标（用于action_quality评估）
+        if len(self.monster_dist_history) >= 2:
+            recent_dists = list(self.monster_dist_history)[-3:]
+            self.danger_trend_value = float(recent_dists[-1] - recent_dists[0])  # 正值表示怪物在离开
+        else:
+            self.danger_trend_value = 0.0
+        
+        self.danger_trend.append(self.danger_trend_value)
         
         # 1. 历史轨迹相似度 (3D)
         # 最近是否重复、轨迹变化、探索度
@@ -989,6 +1002,10 @@ class Preprocessor:
         hero_cell = _coarse_cell(hero_pos)
         flash_cd = float(hero.get("flash_cooldown", 0.0))
         buff_remain = float(hero.get("buff_remaining_time", 0.0))
+        
+        # 更新最大血量（用于动作质量评估）
+        hero_max_hp = float(hero.get("max_hp", 100.0))
+        self.hero_max_hp = hero_max_hp
 
         move_dx = 0.0
         move_dz = 0.0
@@ -1098,6 +1115,35 @@ class Preprocessor:
             nearest_treasure_dist_norm=nearest_treasure_dist_norm,
             last_action=last_action,
         )
+        
+        # ===== 动作质量评估（可选的监控特征，不改变模型输入） =====
+        try:
+            from agent_ppo.feature.action_quality import compute_action_quality_features
+            
+            # 获取英雄当前血量（用于动作质量评估）
+            hero_hp = float(hero.get("hp", 0.0))
+            hero_hp = float(hero.get("hero_hp", hero_hp)) if hero_hp == 0.0 else hero_hp
+            
+            # 计算动作质量评估 (96D: 16 动作 × 6 维度)
+            action_quality_features = compute_action_quality_features(
+                hero_pos=hero_pos,
+                hero_hp=hero_hp,
+                hero_max_hp=self.hero_max_hp,
+                monsters=[m for m in monsters],
+                treasures=[t for t in treasures],
+                buffs=[b for b in buffs],
+                legal_action_mask=np.array(legal_action, dtype=np.float32),
+                local_map=map_info,
+                recent_positions=list(self.trajectory_history) if self.trajectory_history else None,
+                flash_cooldown=int(flash_cd),
+                danger_trend=self.danger_trend_value,
+            )
+            
+            # 添加到reward_info中供监控和调试
+            reward_info["action_quality_features"] = action_quality_features
+        except Exception as e:
+            # 如果action_quality计算失败，仍然继续（这是可选特征）
+            pass
 
         return feature, legal_action, [reward_total], reward_info
 

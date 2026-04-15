@@ -215,7 +215,7 @@ class ConsolidatedThreatFusion(nn.Module):
         return self.fusion(threat_feat, map_feat, temporal_feat)
 
 
-class OpportunitiesFusion(nn.Module):
+class OpportunitiesFusionBlock(nn.Module):
     """Fuse resource opportunities with self state and threat context.
     
     融合资源机会与自身状态和威胁背景。
@@ -228,6 +228,79 @@ class OpportunitiesFusion(nn.Module):
 
     def forward(self, resource_feat, hero_feat, threat_fusion):
         return self.fusion(resource_feat, hero_feat, threat_fusion)
+
+
+class RiskRewardFusionBlock(nn.Module):
+    """Explicit Risk-Reward fusion for decision context.
+    
+    显式风险收益融合块 - 融合威胁和机会信息形成3类中间语义。
+    
+    这个块专门负责理解\"当前局势下应该保守还是冒险\"的决策。
+    
+    输入: threat_fusion(128D) + opportunity_fusion(128D) = 256D
+    输出: 3 类中间语义 (共 96D)
+      - risk_level_repr: 当前风险等级表征 (32D)
+      - opportunity_repr: 当前收益机会表征 (32D)
+      - decision_style_repr: 决策风格建议表征 (32D)
+    
+    职责:
+      - 汇总当前风险 (怪物威胁、地形约束、血量压力)
+      - 汇总当前收益机会 (宝箱、buff、闪现机会)
+      - 判断当前更适合保守策略还是冒险策略
+    """
+    def __init__(self, input_dim=256, hidden_dim_risk=64, hidden_dim_opp=64, hidden_dim_style=64):
+        super().__init__()
+        
+        # Risk Level Representation Branch
+        self.risk_branch = nn.Sequential(
+            make_fc_layer(input_dim, hidden_dim_risk, gain=nn.init.calculate_gain("relu")),
+            nn.LayerNorm(hidden_dim_risk),
+            nn.GELU(),
+            make_fc_layer(hidden_dim_risk, 32, gain=1.0),
+        )
+        
+        # Opportunity Representation Branch
+        self.opportunity_branch = nn.Sequential(
+            make_fc_layer(input_dim, hidden_dim_opp, gain=nn.init.calculate_gain("relu")),
+            nn.LayerNorm(hidden_dim_opp),
+            nn.GELU(),
+            make_fc_layer(hidden_dim_opp, 32, gain=1.0),
+        )
+        
+        # Decision Style Branch (combining risk + opportunity to decide strategy)
+        self.style_branch = nn.Sequential(
+            make_fc_layer(input_dim + 64, hidden_dim_style, gain=nn.init.calculate_gain("relu")),
+            nn.LayerNorm(hidden_dim_style),
+            nn.GELU(),
+            make_fc_layer(hidden_dim_style, 32, gain=1.0),
+        )
+    
+    def forward(self, threat_fusion, opportunity_fusion):
+        """
+        Args:
+            threat_fusion: [batch, 128] - 威胁融合输出
+            opportunity_fusion: [batch, 128] - 机会融合输出
+        
+        Returns:
+            risk_repr: [batch, 32] - 风险表征
+            opp_repr: [batch, 32] - 收益机会表征
+            style_repr: [batch, 32] - 决策风格表征
+            combined_repr: [batch, 96] - 三者拼接，用于继续处理
+        """
+        combined = torch.cat([threat_fusion, opportunity_fusion], dim=-1)  # [batch, 256]
+        
+        risk_repr = self.risk_branch(combined)          # [batch, 32]
+        opp_repr = self.opportunity_branch(combined)    # [batch, 32]
+        
+        # Decision style depends on both risk and opportunity
+        # Concatenate combined input with both representations
+        style_input = torch.cat([combined, risk_repr, opp_repr], dim=-1)  # [batch, 256+32+32=320]
+        style_repr = self.style_branch(style_input)     # [batch, 32]
+        
+        # Combined representation for next layer
+        combined_repr = torch.cat([risk_repr, opp_repr, style_repr], dim=-1)  # [batch, 96]
+        
+        return risk_repr, opp_repr, style_repr, combined_repr
 
 
 class GlobalSituationFusion(nn.Module):
@@ -478,10 +551,18 @@ class ModelV2(nn.Module):
             output_dim=128
         )
         
-        self.opportunity_fusion = OpportunitiesFusion(
+        self.opportunity_fusion = OpportunitiesFusionBlock(
             input_dim=64 + 64 + 128,  # resource + hero + threat_fusion
             hidden_dim=160,
             output_dim=128
+        )
+        
+        # Explicit Risk-Reward Fusion: understands current risk/reward balance
+        self.risk_reward_fusion = RiskRewardFusionBlock(
+            input_dim=128 + 128,  # threat_fusion + opportunity_fusion
+            hidden_dim_risk=64,
+            hidden_dim_opp=64,
+            hidden_dim_style=64,
         )
         
         self.global_fusion = GlobalSituationFusion(
@@ -545,25 +626,37 @@ class ModelV2(nn.Module):
         legal_encoded = self.legal_encoder(legal)                   # [batch, 16]
         
         # ====================================================================
-        # Stage 2: Situation Understanding
+        # Stage 2: Situation Understanding (with explicit risk-reward fusion)
         # ====================================================================
+        
+        # Compute consolidated threat assessment
         threat_fusion_output = self.threat_fusion(
             threat_encoded,
             map_encoded,
             temporal_encoded
-        )  # [batch, 128]
+        )  # [batch, 128] - Consolidated threat from monsters, environment, trends
         
+        # Compute resource opportunities assessment
         opportunity_fusion_output = self.opportunity_fusion(
             resource_encoded,
             hero_encoded,
             threat_fusion_output
-        )  # [batch, 128]
+        )  # [batch, 128] - Fused resource opportunities and self state
         
+        # Explicit risk-reward fusion: understand current situation's risk/reward balance
+        risk_repr, opp_repr, style_repr, decision_context = self.risk_reward_fusion(
+            threat_fusion_output,
+            opportunity_fusion_output
+        )
+        # Returns: 3x[batch, 32] representations + [batch, 96] combined
+        # This provides explicit intermediate semantic: risk_level, opportunity, decision_style
+        
+        # Global situation: integrate all understanding
         global_situation = self.global_fusion(
             threat_fusion_output,
             opportunity_fusion_output,
             legal_encoded
-        )  # [batch, 192]
+        )  # [batch, 192] - Final situation assessment
         
         # ====================================================================
         # Stage 3: Action Planning
