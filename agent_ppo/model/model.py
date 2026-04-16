@@ -69,8 +69,8 @@ class RiskRewardFusionBlock(nn.Module):
       - 怪物威胁 (from monster_fusion)
       - 宝箱收益 (from treasure_encoder)
       - buff 收益 (from buff_encoder)
-      - 时序趋势 (从 plan_encoder 的时序记忆部分)
-      - 动作质量评估 (from action_plan, 包含动作质量评估信息)
+      - 时序趋势 (从 temporal_memory_encoder 的时序记忆部分)
+      - 动作质量评估 (from action_quality_encoder, 包含动作质量评估信息)
     
     输出三类中间语义表示：
       1. 当前风险等级表征（risk_level: 高危/中等/安全）
@@ -230,9 +230,9 @@ class Model(nn.Module):
             self.monster2_dim,
             self.treasure_dim,
             self.buff_dim,
-            self.progress_dim,
+            self.decision_aux_dim,
             self.map_dim,
-            self.plan_dim,
+            self.temporal_memory_dim,
             self.legal_dim,
             self.action_quality_dim,
         ) = Config.FEATURE_SPLIT_SHAPE
@@ -240,13 +240,13 @@ class Model(nn.Module):
         # ====================================================================
         # STAGE 1: 感知阶段 - 各类特征编码器
         # ====================================================================
-        self.self_progress_encoder = MLPBlock(self.self_dim + self.progress_dim, 64, 64)
+        self.self_decision_aux_encoder = MLPBlock(self.self_dim + self.decision_aux_dim, 64, 64)
         self.monster_encoder = MLPBlock(self.monster1_dim, 32, 32)
         self.monster_fusion = MLPBlock(64, 64, 64)  # 威胁融合
         self.treasure_encoder = MLPBlock(self.treasure_dim, 64, 64)
         self.buff_encoder = MLPBlock(self.buff_dim, 16, 16)
         self.map_encoder = MLPBlock(self.map_dim, 64, 64)
-        self.plan_encoder = MLPBlock(self.plan_dim, 96, 96)  # 时序规划
+        self.temporal_memory_encoder = MLPBlock(self.temporal_memory_dim, 96, 96)  # 时序与记忆
         self.legal_encoder = MLPBlock(self.legal_dim, 16, 16)
         
         # 新光百合: 动作质量编码器 (96D -> 64D)
@@ -259,7 +259,7 @@ class Model(nn.Module):
             threat_dim=64,              # monster_fusion output
             opportunity_dim=80,         # treasure_encoder + buff_encoder (64 + 16)
             map_dim=64,                 # map_encoder output
-            temporal_dim=96,            # plan_encoder output
+            temporal_dim=96,            # temporal_memory_encoder output
             action_quality_dim=64,      # action_quality_encoder output
             legal_dim=16,               # legal_encoder output
             output_dim=128,             # 中间表示维度
@@ -268,7 +268,7 @@ class Model(nn.Module):
         # ====================================================================
         # STAGE 3: 决策阶段 - 主干网络
         # ====================================================================
-        fusion_dim = 128 + 64  # risk_reward_fusion output + self_progress
+        fusion_dim = 128 + 64  # risk_reward_fusion output + self_decision_aux_hidden
         self.backbone = nn.Sequential(
             make_fc_layer(fusion_dim, 256, gain=nn.init.calculate_gain("relu")),
             nn.LayerNorm(256),
@@ -311,40 +311,40 @@ class Model(nn.Module):
         # ====================================================================
         # 特征分割
         # ====================================================================
-        self_feat, monster1, monster2, treasure, buff, progress, map_local, action_plan, legal, action_quality = torch.split(
+        self_feat, monster1, monster2, treasure, buff, decision_aux, map_local, temporal_memory, legal, action_quality = torch.split(
             obs, Config.FEATURE_SPLIT_SHAPE, dim=1
         )
 
         # ====================================================================
         # STAGE 1: 特征编码
         # ====================================================================
-        self_progress = self.self_progress_encoder(torch.cat([self_feat, progress], dim=1))
+        self_decision_aux_hidden = self.self_decision_aux_encoder(torch.cat([self_feat, decision_aux], dim=1))
         monster_hidden = torch.cat([self.monster_encoder(monster1), self.monster_encoder(monster2)], dim=1)
         monster_threat = self.monster_fusion(monster_hidden)  # (batch, 64) - 威胁表示
         treasure_hidden = self.treasure_encoder(treasure)     # (batch, 64)
         buff_hidden = self.buff_encoder(buff)                 # (batch, 16)
         map_hidden = self.map_encoder(map_local)              # (batch, 64)
-        plan_hidden = self.plan_encoder(action_plan)          # (batch, 96)
+        temporal_memory_hidden = self.temporal_memory_encoder(temporal_memory)  # (batch, 96)
         legal_hidden = self.legal_encoder(legal)              # (batch, 16)
-        action_quality_hidden = self.action_quality_encoder(action_quality)  # (batch, 64) - NEW
+        action_quality_hidden = self.action_quality_encoder(action_quality)  # (batch, 64)
 
         # ====================================================================
-        # STAGE 2: 风险收益融合 (缓足动作质量和合法性)
+        # STAGE 2: 风险收益融合 (包含动作质量和合法性)
         # ====================================================================
         opportunity_hidden = torch.cat([treasure_hidden, buff_hidden], dim=1)  # (batch, 80)
         fused_context = self.risk_reward_fusion(
             threat_hidden=monster_threat,
             opportunity_hidden=opportunity_hidden,
             map_hidden=map_hidden,
-            temporal_hidden=plan_hidden,
-            action_quality_hidden=action_quality_hidden,  # NEW
-            legal_hidden=legal_hidden,  # NEW
+            temporal_hidden=temporal_memory_hidden,
+            action_quality_hidden=action_quality_hidden,
+            legal_hidden=legal_hidden,
         )  # (batch, 128)
 
         # ====================================================================
         # STAGE 3: 主干网络
         # ====================================================================
-        backbone_input = torch.cat([fused_context, self_progress], dim=1)  # (batch, 192)
+        backbone_input = torch.cat([fused_context, self_decision_aux_hidden], dim=1)  # (batch, 192)
         hidden = self.backbone(backbone_input)  # (batch, 128)
 
         # ====================================================================

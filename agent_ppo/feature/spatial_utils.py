@@ -666,6 +666,107 @@ def quantize_to_coarse_cell(
     return cell_i, cell_j
 
 
+# ============================================================================
+# 7. 方向质量评估 - 共享核心函数
+# ============================================================================
+
+def evaluate_direction_quality(
+    action_id: int,
+    hero_pos: Dict[str, float],
+    monsters: list,
+    treasures: list,
+    local_map: Optional[np.ndarray] = None,
+    map_size: float = MAP_SIZE,
+    extract_pos_fn = None,
+    distance_fn = None,
+) -> Dict[str, float]:
+    """
+    统一的方向质量评估函数 - 被 preprocessor 和 action_quality 共享调用。
+    
+    该函数评估某个方向的综合"质量"，包括安全性、宝箱收益、地形开阔度、障碍风险。
+    
+    Args:
+        action_id: 动作 ID (0-15)
+        hero_pos: 英雄当前位置  
+        monsters: 怪物列表
+        treasures: 宝箱列表
+        local_map: 局部地图 (可选)
+        map_size: 地图尺寸
+        extract_pos_fn: 自定义的位置提取函数，默认使用 extract_safe_pos
+        distance_fn: 自定义的距离计算函数，如果不提供将使用 relative_pos
+    
+    Returns:
+        {
+            "safety": float,           # 安全性评分 [0,1]，离怪物越远越高
+            "treasure_reward": float,  # 宝箱接近度 [0,1]，能更接近宝箱越高
+            "openness": float,         # 地形开阔度 [0,1]，越开阔越高
+            "obstacle_risk": float,    # 障碍风险 [0,1]，有障碍越高
+            "direction_quality": float,# 综合质量 [0,1]，综合加权评分
+        }
+    """
+    if extract_pos_fn is None:
+        extract_pos_fn = extract_safe_pos
+    
+    if distance_fn is None:
+        def distance_fn(pos_a, pos_b):
+            _, _, dist = relative_pos(pos_a, pos_b, map_size)
+            return dist
+    
+    # 计算执行该动作后的新位置
+    next_pos = apply_action_to_pos(hero_pos, action_id, map_size)
+    
+    # 1. 安全性评分：离怪物的最小distance
+    safety = 1.0
+    if monsters:
+        try:
+            next_min_monster_dist = min(
+                distance_fn(next_pos, extract_pos_fn(m)) for m in monsters
+            )
+            # 归一化到 [0,1]，距离越远越接近1
+            safety = float(np.clip(next_min_monster_dist / MAP_DIAG, 0.0, 1.0))
+        except Exception:
+            safety = 1.0
+    
+    # 2. 宝箱收益评分：能否更接近宝箱
+    treasure_reward = 0.0
+    if treasures:
+        try:
+            next_nearest_treasure = min(
+                distance_fn(next_pos, extract_pos_fn(t)) for t in treasures
+            )
+            cur_nearest_treasure = min(
+                distance_fn(hero_pos, extract_pos_fn(t)) for t in treasures
+            )
+            # 如果下一步能更接近宝箱，给予正评分
+            dist_improvement = max(0, cur_nearest_treasure - next_nearest_treasure)
+            treasure_reward = float(np.clip(dist_improvement / 10.0, 0.0, 1.0))
+        except Exception:
+            treasure_reward = 0.0
+    
+    # 3. 地形开阔度和障碍风险（从局部地图）
+    terrain_info = get_direction_ahead_in_local_map(action_id, local_map, depth=3)
+    openness = float(terrain_info.get("openness", 0.7))
+    obstacle_risk = float(terrain_info.get("obstacle_risk", 0.3))
+    
+    # 4. 综合方向质量评分
+    # 权重: 30% 安全性 + 25% 宝箱接近 + 30% 地形开阔 - 15% 障碍风险
+    direction_quality = (
+        0.3 * safety +
+        0.25 * treasure_reward +
+        0.3 * openness -
+        0.15 * obstacle_risk
+    )
+    direction_quality = float(np.clip(direction_quality, 0.0, 1.0))
+    
+    return {
+        "safety": safety,
+        "treasure_reward": treasure_reward,
+        "openness": openness,
+        "obstacle_risk": obstacle_risk,
+        "direction_quality": direction_quality,
+    }
+
+
 if __name__ == "__main__":
     # 运行一致性检查
     consistency_check(verbose=True)

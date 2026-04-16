@@ -25,12 +25,10 @@ from agent_ppo.feature.reward_system_v2 import compute_reward_three_layer
 from agent_ppo.feature.spatial_utils import (
     apply_action_to_pos,
     relative_pos,
-    action_to_delta,
     get_direction_ahead_in_local_map,
     extract_safe_pos,
     quantize_to_coarse_cell,
-    ACTION_ID_TO_DELTA,
-    ACTION_ID_TO_OPPOSITE,
+    evaluate_direction_quality,
 )
 
 # Map size / 地图尺寸（128×128）
@@ -424,45 +422,23 @@ class Preprocessor:
         map_feat = self._build_map_features(map_info)
         
         # 2. 8个移动方向的质量评分 (8D)
-        # 往8个方向每个评估：安全性(怪物距离) + 宝箱收益 + 地形开阔度 + 障碍风险
+        # 使用共享的方向质量评估函数
         direction_quality = []
         
         for action_idx in range(8):  # 只看移动，不看闪现
-            next_pos = apply_action_to_pos(hero_pos, action_idx, MAP_SIZE)
-            
-            # 1) 安全性：离怪物的距离
-            if monsters:
-                next_min_monster = min(_distance(next_pos, extract_safe_pos(m)) for m in monsters)
-                safety = _norm(next_min_monster, MAP_DIAG)
-            else:
-                safety = 1.0
-            
-            # 2) 宝箱收益
-            if treasures:
-                next_nearest_treasure = min(_distance(next_pos, extract_safe_pos(t)) for t in treasures)
-                cur_nearest_treasure = min(_distance(hero_pos, extract_safe_pos(t)) for t in treasures)
-                treasure_reward = _norm(max(0, cur_nearest_treasure - next_nearest_treasure), 10.0)
-            else:
-                treasure_reward = 0.0
-            
-            # 3) 真实地形分析：开阔度和障碍风险
-            if map_info is not None:
-                terrain_info = get_direction_ahead_in_local_map(action_idx, map_info, depth=3)
-                openness = float(terrain_info.get("openness", 0.7))  # [0,1]
-                obstacle_risk = float(terrain_info.get("obstacle_risk", 0.3))  # [0,1]
-            else:
-                openness = 0.7
-                obstacle_risk = 0.3
-            
-            # 综合方向质量：安全性 + 宝箱收益 + 地形开阔度 - 障碍风险
-            quality = (
-                0.3 * safety +           # 怪物距离
-                0.25 * treasure_reward + # 宝箱接近
-                0.3 * openness -         # 地形开阔度
-                0.15 * obstacle_risk     # 障碍风险
+            # 使用统一的方向质量评估函数，避免重复代码
+            eval_result = evaluate_direction_quality(
+                action_id=action_idx,
+                hero_pos=hero_pos,
+                monsters=monsters,
+                treasures=treasures,
+                local_map=map_info,
+                map_size=MAP_SIZE,
+                extract_pos_fn=extract_safe_pos,
+                distance_fn=lambda pos_a, pos_b: relative_pos(pos_a, pos_b, MAP_SIZE)[2],
             )
-            quality = float(np.clip(quality, 0.0, 1.0))
-            direction_quality.append(quality)
+            
+            direction_quality.append(eval_result["direction_quality"])
         
         # 3. 逃生通路评分 (2D)
         # 最安全的方向 + 最多宝箱方向的安全性
