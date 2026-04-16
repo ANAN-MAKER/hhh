@@ -24,6 +24,7 @@ from agent_ppo.algorithm.algorithm import Algorithm
 from agent_ppo.conf.conf import Config
 from agent_ppo.feature.definition import ActData, ObsData
 from agent_ppo.feature.preprocessor import Preprocessor
+from agent_ppo.feature.mask_utils import softmax_numpy
 from agent_ppo.model.model import Model
 
 
@@ -187,13 +188,9 @@ class Agent(BaseAgent):
         """Softmax with legal action masking (numpy).
 
         合法动作掩码下的 softmax（numpy 版）。
+        现已使用统一的mask_utils.softmax_numpy确保一致性。
         """
-        _w, _e = 1e20, 1e-5
-        tmp = input_hidden - _w * (1.0 - legal_action)
-        tmp_max = np.max(tmp, keepdims=True)
-        tmp = np.clip(tmp - tmp_max, -_w, 1)
-        tmp = (np.exp(tmp) + _e) * legal_action
-        return tmp / (np.sum(tmp, keepdims=True) * 1.00001)
+        return softmax_numpy(input_hidden, legal_action)
 
     def _legal_sample(self, probs, use_max=False):
         """Sample action from probability distribution.

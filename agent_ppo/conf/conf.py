@@ -64,3 +64,7 @@ class Config:
     CLIP_PARAM = 0.2
     VF_COEF = 1.0
     GRAD_CLIP_RANGE = 0.5
+    
+    # PPO standard training (multi-epoch, multi-minibatch)
+    PPO_EPOCHS = 4  # Number of epochs to train on the same batch
+    PPO_MINIBATCH_SIZE = 64  # Minibatch size for gradient updates

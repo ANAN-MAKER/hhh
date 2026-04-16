@@ -22,6 +22,7 @@ import time
 
 import torch
 from agent_ppo.conf.conf import Config
+from agent_ppo.feature.mask_utils import softmax_torch
 
 
 class Algorithm:
@@ -38,15 +39,23 @@ class Algorithm:
         self.var_beta = Config.BETA_START
         self.vf_coef = Config.VF_COEF
         self.clip_param = Config.CLIP_PARAM
+        
+        # PPO multi-epoch and minibatch parameters
+        self.num_epochs = getattr(Config, 'PPO_EPOCHS', 4)  # Standard PPO: 3-4 epochs
+        self.minibatch_size = getattr(Config, 'PPO_MINIBATCH_SIZE', 64)  # Standard PPO: 32-128
 
         self.last_report_monitor_time = 0
         self.train_step = 0
 
     def learn(self, list_sample_data):
-        """Training entry: PPO update on a batch of SampleData.
+        """Training entry: PPO update on a batch of SampleData (multi-epoch, multi-minibatch).
 
-        训练入口：对一批 SampleData 执行 PPO 更新。
+        训练入口：对一批 SampleData 执行多轮 PPO 更新（多epoch、多minibatch）。
         """
+        if not list_sample_data:
+            return
+            
+        # 准备数据张量（完整batch）
         obs = torch.stack([f.obs for f in list_sample_data]).to(self.device)
         legal_action = torch.stack([f.legal_action for f in list_sample_data]).to(self.device)
         act = torch.stack([f.act for f in list_sample_data]).to(self.device).view(-1, 1)
@@ -55,46 +64,84 @@ class Algorithm:
         advantage = torch.stack([f.advantage for f in list_sample_data]).to(self.device)
         old_value = torch.stack([f.value for f in list_sample_data]).to(self.device)
         reward_sum = torch.stack([f.reward_sum for f in list_sample_data]).to(self.device)
-
-        self.model.set_train_mode()
-        self.optimizer.zero_grad()
-
-        logits, value_pred = self.model(obs)
-
-        total_loss, info = self._compute_loss(
-            logits=logits,
-            value_pred=value_pred,
-            legal_action=legal_action,
-            old_action=act,
-            old_prob=old_prob,
-            advantage=advantage,
-            old_value=old_value,
-            reward_sum=reward_sum,
-            reward=reward,
-        )
-
-        total_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.parameters, Config.GRAD_CLIP_RANGE)
-        self.optimizer.step()
-        self.train_step += 1
-
+        
+        # 标准化优势（importance for PPO stability）
+        advantage_mean = advantage.mean()
+        advantage_std = advantage.std()
+        if advantage_std > 1e-8:
+            advantage = (advantage - advantage_mean) / (advantage_std + 1e-8)
+        
+        total_batch_size = len(list_sample_data)
+        epoch_losses = []
+        
+        # 多epoch更新（Standard PPO）
+        for epoch in range(self.num_epochs):
+            # 在epoch内创建minibatch
+            indices = torch.randperm(total_batch_size)
+            epoch_loss_sum = 0.0
+            epoch_loss_count = 0
+            
+            for batch_start in range(0, total_batch_size, self.minibatch_size):
+                batch_end = min(batch_start + self.minibatch_size, total_batch_size)
+                batch_indices = indices[batch_start:batch_end]
+                
+                # 获取minibatch
+                batch_obs = obs[batch_indices]
+                batch_legal_action = legal_action[batch_indices]
+                batch_act = act[batch_indices]
+                batch_old_prob = old_prob[batch_indices]
+                batch_advantage = advantage[batch_indices]
+                batch_old_value = old_value[batch_indices]
+                batch_reward_sum = reward_sum[batch_indices]
+                
+                # Forward pass
+                self.model.set_train_mode()
+                self.optimizer.zero_grad()
+                
+                logits, value_pred = self.model(batch_obs)
+                
+                # Compute loss
+                total_loss, info = self._compute_loss(
+                    logits=logits,
+                    value_pred=value_pred,
+                    legal_action=batch_legal_action,
+                    old_action=batch_act,
+                    old_prob=batch_old_prob,
+                    advantage=batch_advantage,
+                    old_value=batch_old_value,
+                    reward_sum=batch_reward_sum,
+                    reward=reward[batch_indices],
+                )
+                
+                # Backward pass
+                total_loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.parameters, Config.GRAD_CLIP_RANGE)
+                self.optimizer.step()
+                
+                epoch_loss_sum += total_loss.item()
+                epoch_loss_count += 1
+                self.train_step += 1
+            
+            # 记录epoch平均loss
+            avg_epoch_loss = epoch_loss_sum / max(epoch_loss_count, 1)
+            epoch_losses.append(avg_epoch_loss)
+        
+        # 多epoch完成后的监控上报
         now = time.time()
         if now - self.last_report_monitor_time >= 60:
+            avg_loss = sum(epoch_losses) / max(len(epoch_losses), 1)
             results = {
-                "reward": round(reward.mean().item(), 4),
-                "total_loss": round(total_loss.item(), 4),
-                "value_loss": round(info["value_loss"].item(), 4),
-                "policy_loss": round(info["policy_loss"].item(), 4),
-                "entropy_loss": round(info["entropy_loss"].item(), 4),
-                "approx_kl": round(info["approx_kl"].item(), 6),
-                "clip_frac": round(info["clip_frac"].item(), 4),
+                "train_step": self.train_step,
+                "num_samples": total_batch_size,
+                "epochs_done": self.num_epochs,
+                "minibatch_size": self.minibatch_size,
+                "avg_epoch_loss": round(avg_loss, 4),
+                "final_epoch_loss": round(epoch_losses[-1] if epoch_losses else 0.0, 4),
             }
             self.logger.info(
-                f"[train] total_loss:{results['total_loss']} "
-                f"policy_loss:{results['policy_loss']} "
-                f"value_loss:{results['value_loss']} "
-                f"entropy:{results['entropy_loss']} "
-                f"approx_kl:{results['approx_kl']} clip_frac:{results['clip_frac']}"
+                f"[train] step:{results['train_step']} samples:{results['num_samples']} "
+                f"epochs:{results['epochs_done']} avg_loss:{results['avg_epoch_loss']} "
+                f"final_loss:{results['final_epoch_loss']}"
             )
             if self.monitor:
                 self.monitor.put_data({os.getpid(): results})
@@ -165,9 +212,6 @@ class Algorithm:
         """Softmax with legal action masking (suppress illegal actions).
 
         合法动作掩码下的 softmax（将非法动作概率压为极小值）。
+        统一使用mask_utils.softmax_torch确保与numpy版本一致。
         """
-        label_max, _ = torch.max(logits * legal_action, dim=1, keepdim=True)
-        label = logits - label_max
-        label = label * legal_action
-        label = label + 1e5 * (legal_action - 1)
-        return torch.nn.functional.softmax(label, dim=1)
+        return softmax_torch(logits, legal_action)
