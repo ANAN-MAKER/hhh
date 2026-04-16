@@ -85,7 +85,7 @@ class RiskRewardFusionBlock(nn.Module):
         threat_dim: int = 64,         # from monster_fusion
         opportunity_dim: int = 96,    # treasure_hidden + buff_hidden (64+16=80)
         map_dim: int = 64,            # from map_encoder
-        temporal_dim: int = 96,       # from plan_encoder
+        temporal_dim: int = 96,       # from temporal_memory_encoder
         action_quality_dim: int = 64, # action_quality_hidden (96->64 after encoder)
         legal_dim: int = 16,          # legal_hidden
         output_dim: int = 128,        # 输出维度

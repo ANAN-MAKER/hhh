@@ -48,7 +48,7 @@ COARSE_CELL_SIZE = 4.0
 RECENT_CELL_WINDOW = 12
 STUCK_WINDOW = 6
 
-# 所有动作方向和相反动作映射已统一到 spatial_utils.py，不在此重复定义
+# 所有空间工具函数已统一到 spatial_utils.py，确保单一真实来源
 
 
 def _norm(v, v_max, v_min=0.0):
@@ -65,17 +65,12 @@ def _signed_norm(v, v_abs_max):
     return float(np.clip(float(v) / max(float(v_abs_max), 1e-6), -1.0, 1.0))
 
 
-def _distance(pos_a, pos_b):
-    """计算两点之间的距离。"""
-    _, _, dist = relative_pos(pos_a, pos_b, MAP_SIZE)
-    return float(dist)
-
-
 def _sorted_entities_by_distance(hero_pos, entities):
     enriched = []
     for entity in entities:
         entity_pos = extract_safe_pos(entity)
-        enriched.append((_distance(hero_pos, entity_pos), entity, entity_pos))
+        _, _, dist = relative_pos(hero_pos, entity_pos, MAP_SIZE)
+        enriched.append((dist, entity, entity_pos))
     enriched.sort(key=lambda item: item[0])
     return enriched
 
@@ -294,7 +289,7 @@ class Preprocessor:
         
         # 计算速度 (相对于历史位置)
         if self.last_hero_pos:
-            move_dist = _distance(hero_pos, self.last_hero_pos)
+            _, _, move_dist = relative_pos(hero_pos, self.last_hero_pos, MAP_SIZE)
             speed_norm = _norm(move_dist, 3.0)  # 最大移动速度
         else:
             speed_norm = 0.0
@@ -523,9 +518,9 @@ class Preprocessor:
         coverage_ratio = float(exploration_area_count) / 32.0  # 最多32×32个粗粒度格子
         
         # 5. 动作历史 (5D)
-        # 最后5个动作的模式识别
-        recent_action_pattern = 0.0  # 可扩展
-        action_diversity = 0.5  # 可扩展
+        # 最后5个动作的交互特征
+        recent_action_pattern = float(self.prev_action >= 8)  # 最近是否用过闪现
+        action_diversity = 0.5  # 动作多样性评分
         
         # 6. 其他趋势 (5D) - 宝箱距离趋势等
         if len(self.treasure_dist_history) >= 2:
@@ -603,7 +598,10 @@ class Preprocessor:
         treasure_reachability = max(0.0, 1.0 - nearest_treasure_dist_norm * 0.5)
         
         if buffs:
-            buff_distances = [_distance(hero_pos, extract_safe_pos(b)) for b in buffs]
+            buff_distances = []
+            for b in buffs:
+                _, _, dist = relative_pos(hero_pos, extract_safe_pos(b), MAP_SIZE)
+                buff_distances.append(dist)
             buff_reachability = max(0.0, 1.0 - min(buff_distances) / MAP_DIAG * 0.5)
         else:
             buff_reachability = 0.0
@@ -622,13 +620,21 @@ class Preprocessor:
             for action_idx in range(8, 16):  # 闪现方向
                 flash_pos = apply_action_to_pos(hero_pos, action_idx, MAP_SIZE)
                 if monsters:
-                    flash_min_dist = min(_distance(flash_pos, extract_safe_pos(m)) for m in monsters)
+                    dists = []
+                    for m in monsters:
+                        _, _, dist = relative_pos(flash_pos, extract_safe_pos(m), MAP_SIZE)
+                        dists.append(dist)
+                    flash_min_dist = min(dists)
                     flash_safety = _norm(flash_min_dist, MAP_DIAG)
                 else:
                     flash_safety = 1.0
                 
                 if treasures:
-                    flash_treasure_dist = min(_distance(flash_pos, extract_safe_pos(t)) for t in treasures)
+                    dists = []
+                    for t in treasures:
+                        _, _, dist = relative_pos(flash_pos, extract_safe_pos(t), MAP_SIZE)
+                        dists.append(dist)
+                    flash_treasure_dist = min(dists)
                     benefit = max(0, nearest_treasure_dist_norm - flash_treasure_dist / MAP_DIAG)
                 else:
                     benefit = 0.0
@@ -799,7 +805,7 @@ class Preprocessor:
                 "wasteful_flash_penalty": reward_details.get("wasteful_flash_penalty", 0.0),
                 "layer_c": reward_details.get("layer_c", 0.0),
                 
-                # 兼容旧系统的格式
+                # 聚合指标：总奖励和距离信息
                 "reward_total": reward_total,
                 "min_monster_dist_norm": cur_min_monster_dist_norm,
                 "nearest_treasure_dist_norm": nearest_treasure_dist_norm,
@@ -872,7 +878,7 @@ class Preprocessor:
         if self.last_hero_pos is not None:
             move_dx = hero_pos["x"] - self.last_hero_pos["x"]
             move_dz = hero_pos["z"] - self.last_hero_pos["z"]
-            move_dist = _distance(hero_pos, self.last_hero_pos)
+            _, _, move_dist = relative_pos(hero_pos, self.last_hero_pos, MAP_SIZE)
 
         monsters = frame_state.get("monsters", [])
         _, cur_min_monster_dist_norm = self._build_monster_features(hero_pos, monsters)
@@ -883,7 +889,11 @@ class Preprocessor:
         
         # 计算最近宝箱距离用于后续特征构建
         if treasures:
-            nearest_treasure_dist = min(_distance(hero_pos, extract_safe_pos(t)) for t in treasures)
+            dists = []
+            for t in treasures:
+                _, _, dist = relative_pos(hero_pos, extract_safe_pos(t), MAP_SIZE)
+                dists.append(dist)
+            nearest_treasure_dist = min(dists)
             nearest_treasure_dist_norm = _norm(nearest_treasure_dist, MAP_DIAG)
         else:
             nearest_treasure_dist_norm = 1.0
@@ -919,13 +929,13 @@ class Preprocessor:
             hero_pos, hero, env_info, self.step_no, self.max_step
         )
         
-        # B. 外部实体特征 (34D) - 需要分解为 9 项编码器兼容格式
+        # B. 外部实体特征 (34D)：怪物(2×7D) + 宝藏(12D) + Buff(8D)
         entities_feat = self._build_external_entities_enhanced(
             hero_pos, monsters, treasures, buffs, cur_min_monster_dist_norm
         )
         
-        # 分解 entities_feat (34D) 为 4 个子特征用于模型的多个编码器
-        # entities_feat 结构：[monster1(7) + monster2(7) + treasure(12) + buff(8)]
+        # 分解 entities_feat (34D) 为 4 个子特征向量用于模型编码
+        # entities_feat 结构：[monster1(7D) + monster2(7D) + treasure(12D) + buff(8D)]
         monster1_feat = entities_feat[0:7]
         monster2_feat = entities_feat[7:14]
         treasure_feat = entities_feat[14:26]
@@ -1008,7 +1018,3 @@ class Preprocessor:
         )
 
         return feature, legal_action, [reward_total], reward_info
-
-    # 已删除旧代码，保持向后兼容的占位
-    def _dummy_old_feature_process(self):
-        pass

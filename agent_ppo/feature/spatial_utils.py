@@ -374,52 +374,60 @@ def get_direction_ahead_in_local_map(
     distance_before_obstacle = depth
     
     # 真实地形分析 (如果提供了local_map)
-    if local_map is not None and local_map.size > 0:
+    # 支持 numpy 数组和 list 两种输入格式
+    if local_map is not None:
         try:
-            # local_map是(H, W)，中心是(H//2, W//2)
-            # 沿方向采样，计算可通行格子的比例
-            map_h, map_w = local_map.shape
-            center_i, center_j = map_h // 2, map_w // 2
+            # 转换 list 为 numpy 数组（如果需要）
+            if isinstance(local_map, list):
+                local_map = np.array(local_map, dtype=np.float32)
             
-            # 标准化方向向量
-            dir_mag = np.sqrt(dx**2 + dz**2)
-            if dir_mag < 1e-6:
-                # 无效方向，返回默认值
-                pass
-            else:
-                # 采样多个点沿方向
-                passable_count = 0
-                total_samples = 0
-                obstacle_distance = depth + 1  # 默认在depth外
+            # 检查 local_map 是否有有效的数据
+            map_size = local_map.size if hasattr(local_map, 'size') else len(local_map) * len(local_map[0]) if local_map else 0
+            if map_size > 0:
+                # local_map是(H, W)，中心是(H//2, W//2)
+                # 沿方向采样，计算可通行格子的比例
+                map_h, map_w = local_map.shape
+                center_i, center_j = map_h // 2, map_w // 2
                 
-                for step in range(1, depth + 1):
-                    # 计算采样点坐标 (local_map中的row, col)
-                    sample_i = int(center_i + step * dz)  # z对应行(行向下为正)
-                    sample_j = int(center_j + step * dx)  # x对应列(列向右为正)
-                    
-                    # 边界检查
-                    if 0 <= sample_i < map_h and 0 <= sample_j < map_w:
-                        total_samples += 1
-                        # 值>=0.7视为可通行，<0.3视为障碍，[0.3,0.7]视为模糊区域
-                        cell_value = float(local_map[sample_i, sample_j])
-                        if cell_value >= 0.7:
-                            passable_count += 1
-                        elif cell_value < 0.3 and obstacle_distance > depth:
-                            obstacle_distance = step
-                    else:
-                        # 超出边界，视为可通行(表示能脱离当前视野)
-                        total_samples += 1
-                        passable_count += 1
-                
-                # 计算开阔度
-                if total_samples > 0:
-                    openness = passable_count / total_samples
-                    base_openness = openness
-                    distance_before_obstacle = min(obstacle_distance, depth + 1)
+                # 标准化方向向量
+                dir_mag = np.sqrt(dx**2 + dz**2)
+                if dir_mag < 1e-6:
+                    # 无效方向，返回默认值
+                    pass
                 else:
-                    # 所有采样点都超出边界，认为是开阔的
-                    openness = 0.9
-                    base_openness = openness
+                    # 采样多个点沿方向
+                    passable_count = 0
+                    total_samples = 0
+                    obstacle_distance = depth + 1  # 默认在depth外
+                    
+                    for step in range(1, depth + 1):
+                        # 计算采样点坐标 (local_map中的row, col)
+                        sample_i = int(center_i + step * dz)  # z对应行(行向下为正)
+                        sample_j = int(center_j + step * dx)  # x对应列(列向右为正)
+                        
+                        # 边界检查
+                        if 0 <= sample_i < map_h and 0 <= sample_j < map_w:
+                            total_samples += 1
+                            # 值>=0.7视为可通行，<0.3视为障碍，[0.3,0.7]视为模糊区域
+                            cell_value = float(local_map[sample_i, sample_j])
+                            if cell_value >= 0.7:
+                                passable_count += 1
+                            elif cell_value < 0.3 and obstacle_distance > depth:
+                                obstacle_distance = step
+                        else:
+                            # 超出边界，视为可通行(表示能脱离当前视野)
+                            total_samples += 1
+                            passable_count += 1
+                    
+                    # 计算开阔度
+                    if total_samples > 0:
+                        openness = passable_count / total_samples
+                        base_openness = openness
+                        distance_before_obstacle = min(obstacle_distance, depth + 1)
+                    else:
+                        # 所有采样点都超出边界，认为是开阔的
+                        openness = 0.9
+                        base_openness = openness
                 
         except Exception as e:
             # 地图分析失败，使用默认值
