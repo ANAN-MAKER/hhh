@@ -30,18 +30,18 @@ class Config:
     ]
     
     # 模型期望的 10 个分组（扩展以包含action_quality）
-    # 映射: [A分解, B分解*3, E作进度, C作地图, D作规划, legal, action_quality]
+    # 结构: [A自身] + [B怪物×2+宝藏+buff] + [E决策辅助] + [C地图路径] + [D时序记忆] + [合法动作] + [动作质量]
     FEATURE_SPLIT_SHAPE = [
-        24,  # self_dim: A的完整部分（自身状态）
-        7,   # monster1_dim: B的怪物部分的一半
-        7,   # monster2_dim: B的怪物部分的另一半
-        12,  # treasure_dim: B的宝藏部分
-        8,   # buff_dim: B的buff部分
-        20,  # progress_dim: E作为决策辅助进度信息
-        35,  # map_dim: C的完整部分（地图与路径）
-        30,  # plan_dim: D作为时序规划信息
-        16,  # legal_dim: 合法动作掩码
-        96,  # action_quality_dim: 动作质量评估 (16动作×6维度)
+        24,  # A: 英雄自身状态 (位置、速度、技能、进度)
+        7,   # B1: 怪物1特征
+        7,   # B2: 怪物2特征
+        12,  # B3: 宝藏特征
+        8,   # B4: Buff特征
+        20,  # E: 决策辅助特征 (动作质量意见、收集进度)
+        35,  # C: 地图与路径特征 (局部地图+方向质量+逃生通路)
+        30,  # D: 时序与记忆特征 (历史轨迹、危险趋势、探索记忆)
+        16,  # 合法动作掩码
+        96,  # 动作质量评估 (16动作×6维度)
     ]
     
     FEATURE_LEN = sum(FEATURE_SPLIT_SHAPE)  # 255维（从159D扩展）

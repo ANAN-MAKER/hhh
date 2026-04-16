@@ -31,6 +31,7 @@ try:
         apply_action_to_pos,
         relative_pos,
         action_to_delta,
+        get_direction_ahead_in_local_map,
         ACTION_ID_TO_DELTA,
         ACTION_ID_TO_OPPOSITE,
     )
@@ -56,46 +57,7 @@ COARSE_CELL_SIZE = 4.0
 RECENT_CELL_WINDOW = 12
 STUCK_WINDOW = 6
 
-# 8 move directions + 8 flash directions
-# 注意：现在使用 spatial_utils 中的统一定义
-# ACTION_DELTAS 保留为快速查询，但与 spatial_utils.ACTION_ID_TO_DELTA 保持同步
-ACTION_DELTAS = [
-    (1.0, 0.0),      # 0: 右
-    (1.0, -1.0),     # 1: 右上
-    (0.0, -1.0),     # 2: 上
-    (-1.0, -1.0),    # 3: 左上
-    (-1.0, 0.0),     # 4: 左
-    (-1.0, 1.0),     # 5: 左下
-    (0.0, 1.0),      # 6: 下
-    (1.0, 1.0),      # 7: 右下
-    (10.0, 0.0),     # 8: 右闪
-    (8.0, -8.0),     # 9: 右上闪
-    (0.0, -10.0),    # 10: 上闪
-    (-8.0, -8.0),    # 11: 左上闪
-    (-10.0, 0.0),    # 12: 左闪
-    (-8.0, 8.0),     # 13: 左下闪
-    (0.0, 10.0),     # 14: 下闪
-    (8.0, 8.0),      # 15: 右下闪
-]
-
-OPPOSITE_ACTION = {
-    0: 4,
-    1: 5,
-    2: 6,
-    3: 7,
-    4: 0,
-    5: 1,
-    6: 2,
-    7: 3,
-    8: 12,
-    9: 13,
-    10: 14,
-    11: 15,
-    12: 8,
-    13: 9,
-    14: 10,
-    15: 11,
-}
+# 所有动作方向和相反动作映射已统一到 spatial_utils.py，不在此重复定义
 
 
 def _norm(v, v_max, v_min=0.0):
@@ -121,12 +83,9 @@ def _safe_pos(obj):
 
 
 def _distance(pos_a, pos_b):
-    """计算两点之间的距离。使用spatial_utils如果可用，否则使用本地实现。"""
-    if USE_SPATIAL_UTILS:
-        _, _, dist = relative_pos(pos_a, pos_b, MAP_SIZE)
-        return float(dist)
-    else:
-        return float(np.sqrt((pos_a["x"] - pos_b["x"]) ** 2 + (pos_a["z"] - pos_b["z"]) ** 2))
+    """计算两点之间的距离。"""
+    _, _, dist = relative_pos(pos_a, pos_b, MAP_SIZE)
+    return float(dist)
 
 
 def _coarse_cell(pos):
@@ -137,15 +96,8 @@ def _coarse_cell(pos):
 
 
 def _apply_action(pos, action_idx):
-    """应用动作到位置。使用spatial_utils如果可用，否则使用本地实现。"""
-    if USE_SPATIAL_UTILS:
-        return apply_action_to_pos(pos, action_idx, MAP_SIZE)
-    else:
-        dx, dz = ACTION_DELTAS[action_idx]
-        return {
-            "x": float(np.clip(pos["x"] + dx, 0.0, MAP_SIZE - 1.0)),
-            "z": float(np.clip(pos["z"] + dz, 0.0, MAP_SIZE - 1.0)),
-        }
+    """应用动作到位置。使用统一的 spatial_utils 实现。"""
+    return apply_action_to_pos(pos, action_idx, MAP_SIZE)
 
 
 def _sorted_entities_by_distance(hero_pos, entities):
@@ -155,6 +107,28 @@ def _sorted_entities_by_distance(hero_pos, entities):
         enriched.append((_distance(hero_pos, entity_pos), entity, entity_pos))
     enriched.sort(key=lambda item: item[0])
     return enriched
+
+
+def _extract_hero_hp_info(hero_dict):
+    """
+    统一提取英雄的血量信息（hp 和 max_hp）。
+    
+    读取优先级：
+    - hp: 优先使用 hero_dict["hp"]，如果不存在则尝试 hero_dict["hero_hp"]
+    - max_hp: 使用 hero_dict["max_hp"]，如果不存在默认为 100.0
+    
+    Returns:
+        (hero_hp, hero_max_hp): 元组，两个值都是 float
+    """
+    # 读取 hp，优先级: hp > hero_hp > 0.0
+    hero_hp = float(hero_dict.get("hp", 0.0))
+    if hero_hp == 0.0:
+        hero_hp = float(hero_dict.get("hero_hp", 0.0))
+    
+    # 读取 max_hp，默认值 100.0
+    hero_max_hp = float(hero_dict.get("max_hp", 100.0))
+    
+    return hero_hp, hero_max_hp
 
 
 class Preprocessor:
@@ -318,41 +292,6 @@ class Preprocessor:
                 flat_idx += 1
         return map_feat
 
-    def _build_action_plan_features(self, hero_pos, monsters, treasures):
-        hero_cell = _coarse_cell(hero_pos)
-        if treasures:
-            cur_nearest_treasure = min(_distance(hero_pos, _safe_pos(treasure)) for treasure in treasures)
-        else:
-            cur_nearest_treasure = MAP_DIAG
-
-        action_plan = []
-        for action_idx in range(16):
-            next_pos = _apply_action(hero_pos, action_idx)
-            next_cell = _coarse_cell(next_pos)
-
-            if monsters:
-                next_min_monster = min(_distance(next_pos, _safe_pos(monster)) for monster in monsters)
-                next_min_monster_norm = _norm(next_min_monster, MAP_DIAG)
-            else:
-                next_min_monster_norm = 1.0
-
-            if treasures:
-                next_nearest_treasure = min(_distance(next_pos, _safe_pos(treasure)) for treasure in treasures)
-                treasure_gain = float(
-                    np.clip(
-                        0.5 + 3.0 * _signed_norm(cur_nearest_treasure - next_nearest_treasure, 12.0),
-                        0.0,
-                        1.0,
-                    )
-                )
-            else:
-                treasure_gain = 0.5
-
-            revisit_norm = _norm(self.visit_counter.get(next_cell, 0) + int(next_cell == hero_cell), 6.0)
-            action_plan.extend([next_min_monster_norm, treasure_gain, revisit_norm])
-
-        return np.array(action_plan, dtype=np.float32)
-
     # ===== 五大类特征计算方法 =====
     
     def _build_hero_enhanced_features(self, hero_pos, hero, env_info, step_no, max_step):
@@ -500,20 +439,20 @@ class Preprocessor:
         map_feat = self._build_map_features(map_info)
         
         # 2. 8个移动方向的质量评分 (8D)
-        # 往8个方向每个评估：安全性 + 宝箱收益
+        # 往8个方向每个评估：安全性(怪物距离) + 宝箱收益 + 地形开阔度 + 障碍风险
         direction_quality = []
         
         for action_idx in range(8):  # 只看移动，不看闪现
             next_pos = _apply_action(hero_pos, action_idx)
             
-            # 安全性：离怪物的距离
+            # 1) 安全性：离怪物的距离
             if monsters:
                 next_min_monster = min(_distance(next_pos, _safe_pos(m)) for m in monsters)
                 safety = _norm(next_min_monster, MAP_DIAG)
             else:
                 safety = 1.0
             
-            # 宝箱收益
+            # 2) 宝箱收益
             if treasures:
                 next_nearest_treasure = min(_distance(next_pos, _safe_pos(t)) for t in treasures)
                 cur_nearest_treasure = min(_distance(hero_pos, _safe_pos(t)) for t in treasures)
@@ -521,8 +460,23 @@ class Preprocessor:
             else:
                 treasure_reward = 0.0
             
-            # 综合方向质量
-            quality = 0.4 * safety + 0.6 * treasure_reward
+            # 3) 真实地形分析：开阔度和障碍风险
+            if map_info is not None:
+                terrain_info = get_direction_ahead_in_local_map(action_idx, map_info, depth=3)
+                openness = float(terrain_info.get("openness", 0.7))  # [0,1]
+                obstacle_risk = float(terrain_info.get("obstacle_risk", 0.3))  # [0,1]
+            else:
+                openness = 0.7
+                obstacle_risk = 0.3
+            
+            # 综合方向质量：安全性 + 宝箱收益 + 地形开阔度 - 障碍风险
+            quality = (
+                0.3 * safety +           # 怪物距离
+                0.25 * treasure_reward + # 宝箱接近
+                0.3 * openness -         # 地形开阔度
+                0.15 * obstacle_risk     # 障碍风险
+            )
+            quality = float(np.clip(quality, 0.0, 1.0))
             direction_quality.append(quality)
         
         # 3. 逃生通路评分 (2D)
@@ -894,8 +848,13 @@ class Preprocessor:
                 return reward_total, reward_info
                 
             except Exception as e:
-                # 新系统出错，降级到旧系统
-                logger.warning(f"New reward system error: {e}, falling back to old system")
+                # 新系统出错，降级到旧系统（保守模式）
+                # 使用高亮日志确保实验人员注意到这个重要的系统切换
+                logger.critical(
+                    f"[REWARD SYSTEM FALLBACK] New reward_system_v2 failed: {type(e).__name__}: {e}\n"
+                    f"  Switching to legacy reward system. Please verify this is intentional.\n"
+                    f"  Details: {str(e)[-100:]}"
+                )
                 USE_NEW_REWARD_SYSTEM = False
         
         # ====== 降级到旧的奖励系统（向后兼容） ======
@@ -933,9 +892,9 @@ class Preprocessor:
             loiter_penalty -= 0.035 * max(0, repeat_count - 2)
             loiter_penalty -= 0.15 * stuck_score
             if (
-                self.prev_action in OPPOSITE_ACTION
-                and last_action in OPPOSITE_ACTION
-                and OPPOSITE_ACTION[last_action] == self.prev_action
+                self.prev_action in ACTION_ID_TO_OPPOSITE
+                and last_action in ACTION_ID_TO_OPPOSITE
+                and ACTION_ID_TO_OPPOSITE[last_action] == self.prev_action
             ):
                 loiter_penalty -= 0.025
 
@@ -1035,8 +994,8 @@ class Preprocessor:
         flash_cd = float(hero.get("flash_cooldown", 0.0))
         buff_remain = float(hero.get("buff_remaining_time", 0.0))
         
-        # 更新最大血量（用于动作质量评估）
-        hero_max_hp = float(hero.get("max_hp", 100.0))
+        # 统一提取英雄血量信息（会在后续action_quality计算时使用）
+        _, hero_max_hp = _extract_hero_hp_info(hero)
         self.hero_max_hp = hero_max_hp
 
         move_dx = 0.0
@@ -1140,9 +1099,8 @@ class Preprocessor:
         try:
             from agent_ppo.feature.action_quality import compute_action_quality_features
             
-            # 获取英雄当前血量（用于动作质量评估）
-            hero_hp = float(hero.get("hp", 0.0))
-            hero_hp = float(hero.get("hero_hp", hero_hp)) if hero_hp == 0.0 else hero_hp
+            # 获取英雄当前血量（用于动作质量评估）— 使用统一的提取函数
+            hero_hp, _ = _extract_hero_hp_info(hero)
             
             # 计算动作质量评估 (96D: 16 动作 × 6 维度)
             # 使用hero_pos_history (存储实际{x,z}位置) 而不是trajectory_history (存储coarse_cell)
