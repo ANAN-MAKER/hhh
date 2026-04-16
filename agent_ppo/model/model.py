@@ -82,20 +82,22 @@ class RiskRewardFusionBlock(nn.Module):
     
     def __init__(
         self,
-        threat_dim: int = 64,    # from monster_fusion
-        opportunity_dim: int = 96,  # treasure_hidden + buff_hidden (64+16=80, 近似96)
-        map_dim: int = 64,        # from map_encoder
-        temporal_dim: int = 96,   # from plan_encoder
-        output_dim: int = 128,    # 输出维度
+        threat_dim: int = 64,         # from monster_fusion
+        opportunity_dim: int = 96,    # treasure_hidden + buff_hidden (64+16=80)
+        map_dim: int = 64,            # from map_encoder
+        temporal_dim: int = 96,       # from plan_encoder
+        action_quality_dim: int = 64, # action_quality_hidden (96->64 after encoder)
+        legal_dim: int = 16,          # legal_hidden
+        output_dim: int = 128,        # 输出维度
     ):
         super().__init__()
         
         # ====================================================================
         # 1. 风险等级评估子模块
         # ====================================================================
-        # 输入: 威胁信息 + 地图信息 + 时序信息 -> 风险评分
+        # 输入: 威胁信息 + 地图信息 + 时序信息 + 合法性 -> 风险评分
         self.risk_encoder = MLPBlock(
-            in_features=threat_dim + map_dim,
+            in_features=threat_dim + map_dim + legal_dim,
             hidden_features=96,
             out_features=64,
         )
@@ -108,9 +110,9 @@ class RiskRewardFusionBlock(nn.Module):
         # ====================================================================
         # 2. 收益机会评估子模块
         # ====================================================================
-        # 输入: 宝箱/buff 信息 + 时序趋势 -> 收益机会评分
+        # 输入: 宝箱/buff 信息 + 时序趋势 + 动作质量 -> 收益机会评分
         self.opportunity_encoder = MLPBlock(
-            in_features=opportunity_dim + temporal_dim,
+            in_features=opportunity_dim + temporal_dim + action_quality_dim,
             hidden_features=128,
             out_features=96,
         )
@@ -138,36 +140,39 @@ class RiskRewardFusionBlock(nn.Module):
         # ====================================================================
         # 4. 最终融合层
         # ====================================================================
-        # 把三类语义和原始编码信息融合输出
-        fusion_input_dim = 64 + 96 + 64 + threat_dim + opportunity_dim + map_dim
+        # 把三类语义和原始编码信息融合输出 (包含action_quality和legal)
+        fusion_input_dim = 64 + 96 + 64 + threat_dim + opportunity_dim + map_dim + action_quality_dim + legal_dim
         self.final_fusion = MLPBlock(
             in_features=fusion_input_dim,
             hidden_features=256,
             out_features=output_dim,
         )
     
-    def forward(self, threat_hidden, opportunity_hidden, map_hidden, temporal_hidden):
+    def forward(self, threat_hidden, opportunity_hidden, map_hidden, temporal_hidden, 
+                 action_quality_hidden, legal_hidden):
         """
         Args:
             threat_hidden: 怪物威胁编码 (batch_size, threat_dim)
             opportunity_hidden: 宝箱/buff 编码拼接 (batch_size, opportunity_dim)
             map_hidden: 地图编码 (batch_size, map_dim)
             temporal_hidden: 时序记忆编码 (batch_size, temporal_dim)
+            action_quality_hidden: 动作质量编码 (batch_size, action_quality_dim)
+            legal_hidden: 合法动作编码 (batch_size, legal_dim)
         
         Returns:
             fused_context: 融合后的决策上下文 (batch_size, output_dim=128)
         """
         # ====================================================================
-        # 风险评估
+        # 风险评估 (包含合法性约束)
         # ====================================================================
-        risk_input = torch.cat([threat_hidden, map_hidden], dim=1)
+        risk_input = torch.cat([threat_hidden, map_hidden, legal_hidden], dim=1)
         risk_repr = self.risk_encoder(risk_input)  # (batch, 64)
         risk_scores = self.risk_gate(risk_repr)     # (batch, 3)
         
         # ====================================================================
-        # 收益评估
+        # 收益评估 (包含动作质量)
         # ====================================================================
-        opportunity_input = torch.cat([opportunity_hidden, temporal_hidden], dim=1)
+        opportunity_input = torch.cat([opportunity_hidden, temporal_hidden, action_quality_hidden], dim=1)
         opportunity_repr = self.opportunity_encoder(opportunity_input)  # (batch, 96)
         opportunity_scores = self.opportunity_gate(opportunity_repr)    # (batch, 3)
         
@@ -181,14 +186,16 @@ class RiskRewardFusionBlock(nn.Module):
         # ====================================================================
         # 最终融合
         # ====================================================================
-        # 把中间表示和原始编码拼接
+        # 把中间表示和原始编码拼接 (包含action_quality和legal)
         fusion_input = torch.cat([
-            risk_repr,           # (batch, 64)
-            opportunity_repr,    # (batch, 96)
-            decision_repr,       # (batch, 64)
-            threat_hidden,       # (batch, threat_dim)
-            opportunity_hidden,  # (batch, opportunity_dim)
-            map_hidden,          # (batch, map_dim)
+            risk_repr,               # (batch, 64)
+            opportunity_repr,        # (batch, 96)
+            decision_repr,           # (batch, 64)
+            threat_hidden,           # (batch, threat_dim)
+            opportunity_hidden,      # (batch, opportunity_dim)
+            map_hidden,              # (batch, map_dim)
+            action_quality_hidden,   # (batch, action_quality_dim)
+            legal_hidden,            # (batch, legal_dim)
         ], dim=1)
         
         fused_context = self.final_fusion(fusion_input)  # (batch, 128)
@@ -241,16 +248,21 @@ class Model(nn.Module):
         self.map_encoder = MLPBlock(self.map_dim, 64, 64)
         self.plan_encoder = MLPBlock(self.plan_dim, 96, 96)  # 时序规划
         self.legal_encoder = MLPBlock(self.legal_dim, 16, 16)
+        
+        # 新光百合: 动作质量编码器 (96D -> 64D)
+        self.action_quality_encoder = MLPBlock(self.action_quality_dim, 96, 64)
 
         # ====================================================================
         # STAGE 2: 理解阶段 - 风险收益融合块
         # ====================================================================
         self.risk_reward_fusion = RiskRewardFusionBlock(
-            threat_dim=64,         # monster_fusion output
-            opportunity_dim=80,    # treasure_encoder + buff_encoder (64 + 16)
-            map_dim=64,            # map_encoder output
-            temporal_dim=96,       # plan_encoder output
-            output_dim=128,        # 中间表示维度
+            threat_dim=64,              # monster_fusion output
+            opportunity_dim=80,         # treasure_encoder + buff_encoder (64 + 16)
+            map_dim=64,                 # map_encoder output
+            temporal_dim=96,            # plan_encoder output
+            action_quality_dim=64,      # action_quality_encoder output
+            legal_dim=16,               # legal_encoder output
+            output_dim=128,             # 中间表示维度
         )
 
         # ====================================================================
@@ -314,9 +326,10 @@ class Model(nn.Module):
         map_hidden = self.map_encoder(map_local)              # (batch, 64)
         plan_hidden = self.plan_encoder(action_plan)          # (batch, 96)
         legal_hidden = self.legal_encoder(legal)              # (batch, 16)
+        action_quality_hidden = self.action_quality_encoder(action_quality)  # (batch, 64) - NEW
 
         # ====================================================================
-        # STAGE 2: 风险收益融合
+        # STAGE 2: 风险收益融合 (缓足动作质量和合法性)
         # ====================================================================
         opportunity_hidden = torch.cat([treasure_hidden, buff_hidden], dim=1)  # (batch, 80)
         fused_context = self.risk_reward_fusion(
@@ -324,6 +337,8 @@ class Model(nn.Module):
             opportunity_hidden=opportunity_hidden,
             map_hidden=map_hidden,
             temporal_hidden=plan_hidden,
+            action_quality_hidden=action_quality_hidden,  # NEW
+            legal_hidden=legal_hidden,  # NEW
         )  # (batch, 128)
 
         # ====================================================================

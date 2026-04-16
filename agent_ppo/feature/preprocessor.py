@@ -25,6 +25,20 @@ try:
 except ImportError:
     USE_NEW_REWARD_SYSTEM = False
 
+# 导入统一的空间工具库
+try:
+    from agent_ppo.feature.spatial_utils import (
+        apply_action_to_pos,
+        relative_pos,
+        action_to_delta,
+        ACTION_ID_TO_DELTA,
+        ACTION_ID_TO_OPPOSITE,
+    )
+    USE_SPATIAL_UTILS = True
+except ImportError:
+    USE_SPATIAL_UTILS = False
+    logger.warning("Failed to import spatial_utils, falling back to local implementations")
+
 # Map size / 地图尺寸（128×128）
 MAP_SIZE = 128.0
 MAP_DIAG = float(np.sqrt(MAP_SIZE**2 + MAP_SIZE**2))
@@ -107,7 +121,12 @@ def _safe_pos(obj):
 
 
 def _distance(pos_a, pos_b):
-    return float(np.sqrt((pos_a["x"] - pos_b["x"]) ** 2 + (pos_a["z"] - pos_b["z"]) ** 2))
+    """计算两点之间的距离。使用spatial_utils如果可用，否则使用本地实现。"""
+    if USE_SPATIAL_UTILS:
+        _, _, dist = relative_pos(pos_a, pos_b, MAP_SIZE)
+        return float(dist)
+    else:
+        return float(np.sqrt((pos_a["x"] - pos_b["x"]) ** 2 + (pos_a["z"] - pos_b["z"]) ** 2))
 
 
 def _coarse_cell(pos):
@@ -118,11 +137,15 @@ def _coarse_cell(pos):
 
 
 def _apply_action(pos, action_idx):
-    dx, dz = ACTION_DELTAS[action_idx]
-    return {
-        "x": float(np.clip(pos["x"] + dx, 0.0, MAP_SIZE - 1.0)),
-        "z": float(np.clip(pos["z"] + dz, 0.0, MAP_SIZE - 1.0)),
-    }
+    """应用动作到位置。使用spatial_utils如果可用，否则使用本地实现。"""
+    if USE_SPATIAL_UTILS:
+        return apply_action_to_pos(pos, action_idx, MAP_SIZE)
+    else:
+        dx, dz = ACTION_DELTAS[action_idx]
+        return {
+            "x": float(np.clip(pos["x"] + dx, 0.0, MAP_SIZE - 1.0)),
+            "z": float(np.clip(pos["z"] + dz, 0.0, MAP_SIZE - 1.0)),
+        }
 
 
 def _sorted_entities_by_distance(hero_pos, entities):
@@ -872,7 +895,7 @@ class Preprocessor:
                 
             except Exception as e:
                 # 新系统出错，降级到旧系统
-                print(f"Warning: New reward system error: {e}, falling back to old system")
+                logger.warning(f"New reward system error: {e}, falling back to old system")
                 USE_NEW_REWARD_SYSTEM = False
         
         # ====== 降级到旧的奖励系统（向后兼容） ======

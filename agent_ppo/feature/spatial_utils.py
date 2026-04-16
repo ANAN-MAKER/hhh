@@ -34,7 +34,10 @@ Spatial coordinate system alignment and transformation utilities.
 """
 
 import numpy as np
+import logging
 from typing import Tuple, Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -75,11 +78,12 @@ ACTION_ID_TO_OPPOSITE = {
 }
 
 # 方向名称映射（用于 debug 输出）
+# 对齐方向定义：z向下为正，当dz=-1时表示向上
 ACTION_ID_TO_NAME = {
-    0: "right", 1: "down-right", 2: "down", 3: "down-left",
-    4: "left", 5: "up-left", 6: "up", 7: "up-right",
-    8: "flash-right", 9: "flash-down-right", 10: "flash-down", 11: "flash-down-left",
-    12: "flash-left", 13: "flash-up-left", 14: "flash-up", 15: "flash-up-right",
+    0: "right", 1: "up-right", 2: "up", 3: "up-left",
+    4: "left", 5: "down-left", 6: "down", 7: "down-right",
+    8: "flash-right", 9: "flash-up-right", 10: "flash-up", 11: "flash-up-left",
+    12: "flash-left", 13: "flash-down-left", 14: "flash-down", 15: "flash-down-right",
 }
 
 # 局部地图中的方向对应关系（从中心指向边界）
@@ -344,37 +348,89 @@ def get_direction_ahead_in_local_map(
     """
     判断某个动作方向在局部地图中前方的情况。
     
-    (注: 该函数支持将来扩展以支持实际的局部地图分析)
+    根据action_id确定方向，沿该方向采样local_map来评估前方开阔度。
     
     Args:
-        action_id: 动作 ID
-        local_map: 局部地图 (21x21)，可选。如果提供，会分析实际障碍
-        depth: 前方预测深度（步数）
+        action_id: 动作 ID (0-15)
+        local_map: 局部地图 (21x21)，值为[0,1]，0表示障碍，1表示开阔
+        depth: 前方预测深度（采样步数）
     
     Returns:
         {
-            "openness": float,  # 该方向的开阔度 [0, 1]
-            "obstacle_risk": float,  # 遇到障碍的风险 [0, 1]
+            "openness": float,      # 该方向的开阔度 [0, 1]
+            "obstacle_risk": float, # 遇到障碍的风险 [0, 1]
             "distance_before_obstacle": int,  # 预计几步后会遇障碍
         }
     """
+    # 获取动作方向向量
+    dx, dz = action_to_delta(action_id)
+    
+    # 默认基础值（如果没有local_map或采样失败）
     if action_is_movement(action_id):
-        # 移动动作：通常更容易与地形互动
         base_openness = 0.7
     else:
-        # 闪现动作：长距离移动，通常更难遇障碍
         base_openness = 0.9
     
-    result = {
-        "openness": base_openness,
-        "obstacle_risk": 1.0 - base_openness,
-        "distance_before_obstacle": depth if base_openness > 0.5 else 1,
-    }
+    distance_before_obstacle = depth
     
-    # 如果提供了局部地图，可在此扩展实际分析逻辑
-    if local_map is not None:
-        # TODO: 根据局部地图和动作方向，计算更精确的开阔度
-        pass
+    # 真实地形分析 (如果提供了local_map)
+    if local_map is not None and local_map.size > 0:
+        try:
+            # local_map是(H, W)，中心是(H//2, W//2)
+            # 沿方向采样，计算可通行格子的比例
+            map_h, map_w = local_map.shape
+            center_i, center_j = map_h // 2, map_w // 2
+            
+            # 标准化方向向量
+            dir_mag = np.sqrt(dx**2 + dz**2)
+            if dir_mag < 1e-6:
+                # 无效方向，返回默认值
+                pass
+            else:
+                # 采样多个点沿方向
+                passable_count = 0
+                total_samples = 0
+                obstacle_distance = depth + 1  # 默认在depth外
+                
+                for step in range(1, depth + 1):
+                    # 计算采样点坐标 (local_map中的row, col)
+                    sample_i = int(center_i + step * dz)  # z对应行(行向下为正)
+                    sample_j = int(center_j + step * dx)  # x对应列(列向右为正)
+                    
+                    # 边界检查
+                    if 0 <= sample_i < map_h and 0 <= sample_j < map_w:
+                        total_samples += 1
+                        # 值>=0.7视为可通行，<0.3视为障碍，[0.3,0.7]视为模糊区域
+                        cell_value = float(local_map[sample_i, sample_j])
+                        if cell_value >= 0.7:
+                            passable_count += 1
+                        elif cell_value < 0.3 and obstacle_distance > depth:
+                            obstacle_distance = step
+                    else:
+                        # 超出边界，视为可通行(表示能脱离当前视野)
+                        total_samples += 1
+                        passable_count += 1
+                
+                # 计算开阔度
+                if total_samples > 0:
+                    openness = passable_count / total_samples
+                    base_openness = openness
+                    distance_before_obstacle = min(obstacle_distance, depth + 1)
+                else:
+                    # 所有采样点都超出边界，认为是开阔的
+                    openness = 0.9
+                    base_openness = openness
+                
+        except Exception as e:
+            # 地图分析失败，使用默认值
+            logger.warning(f"Local map analysis failed for action {action_id}: {e}")
+            pass
+    
+    result = {
+        "openness": float(np.clip(base_openness, 0.0, 1.0)),
+        "obstacle_risk": float(np.clip(1.0 - base_openness, 0.0, 1.0)),
+        "distance_before_obstacle": int(distance_before_obstacle),
+    }
     
     return result
 
