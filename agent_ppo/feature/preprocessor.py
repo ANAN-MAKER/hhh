@@ -11,8 +11,12 @@ Feature preprocessor and reward design for Gorge Chase PPO.
 """
 
 from collections import Counter, deque
+import logging
 
 import numpy as np
+
+# 配置日志
+logger = logging.getLogger(__name__)
 
 # 导入新的三层奖励系统
 try:
@@ -39,23 +43,25 @@ RECENT_CELL_WINDOW = 12
 STUCK_WINDOW = 6
 
 # 8 move directions + 8 flash directions
+# 注意：现在使用 spatial_utils 中的统一定义
+# ACTION_DELTAS 保留为快速查询，但与 spatial_utils.ACTION_ID_TO_DELTA 保持同步
 ACTION_DELTAS = [
-    (1.0, 0.0),
-    (1.0, 1.0),
-    (0.0, 1.0),
-    (-1.0, 1.0),
-    (-1.0, 0.0),
-    (-1.0, -1.0),
-    (0.0, -1.0),
-    (1.0, -1.0),
-    (10.0, 0.0),
-    (8.0, 8.0),
-    (0.0, 10.0),
-    (-8.0, 8.0),
-    (-10.0, 0.0),
-    (-8.0, -8.0),
-    (0.0, -10.0),
-    (8.0, -8.0),
+    (1.0, 0.0),      # 0: 右
+    (1.0, -1.0),     # 1: 右上
+    (0.0, -1.0),     # 2: 上
+    (-1.0, -1.0),    # 3: 左上
+    (-1.0, 0.0),     # 4: 左
+    (-1.0, 1.0),     # 5: 左下
+    (0.0, 1.0),      # 6: 下
+    (1.0, 1.0),      # 7: 右下
+    (10.0, 0.0),     # 8: 右闪
+    (8.0, -8.0),     # 9: 右上闪
+    (0.0, -10.0),    # 10: 上闪
+    (-8.0, -8.0),    # 11: 左上闪
+    (-10.0, 0.0),    # 12: 左闪
+    (-8.0, 8.0),     # 13: 左下闪
+    (0.0, 10.0),     # 14: 下闪
+    (8.0, 8.0),      # 15: 右下闪
 ]
 
 OPPOSITE_ACTION = {
@@ -148,7 +154,8 @@ class Preprocessor:
         self.prev_action = -1
         
         # D: 时序与记忆特征 - 新增
-        self.trajectory_history = deque(maxlen=20)  # 历史轨迹
+        self.trajectory_history = deque(maxlen=20)  # 历史轨迹（coarse cells）
+        self.hero_pos_history = deque(maxlen=20)   # 英雄实际位置历史（{x,z}字典） - 用于action_quality
         self.monster_dist_history = deque(maxlen=15)  # 怪物距离历史
         self.treasure_dist_history = deque(maxlen=15)  # 宝箱距离历史
         self.reward_history = deque(maxlen=15)  # 奖励历史
@@ -982,6 +989,8 @@ class Preprocessor:
         self.visit_counter[hero_cell] += 1
         self.visited_cells.add(hero_cell)
         self.recent_cells.append(hero_cell)
+        self.trajectory_history.append(hero_cell)  # 存储coarse cell用于grid划分
+        self.hero_pos_history.append({"x": hero_pos["x"], "z": hero_pos["z"]})  # 存储exact位置用于action_quality
         self.prev_action = int(last_action) if isinstance(last_action, (int, np.integer)) else -1
 
     def feature_process(self, env_obs, last_action):
@@ -1065,6 +1074,13 @@ class Preprocessor:
             hero_pos, monsters, treasures, buffs, cur_min_monster_dist_norm
         )
         
+        # 分解 entities_feat (34D) 为 4 个子特征用于模型的多个编码器
+        # entities_feat 结构：[monster1(7) + monster2(7) + treasure(12) + buff(8)]
+        monster1_feat = entities_feat[0:7]
+        monster2_feat = entities_feat[7:14]
+        treasure_feat = entities_feat[14:26]
+        buff_feat = entities_feat[26:34]
+        
         # C. 地图与路径特征 (35D)
         map_and_paths_feat = self._build_map_and_paths_enhanced(
             map_info, hero_pos, monsters, treasures
@@ -1083,28 +1099,8 @@ class Preprocessor:
             flash_cd, buff_remain, move_dist
         )
         
-        # 分解 entities_feat (34D) 为 4 个子特征用于模型的 9 个编码器
-        # entities_feat 结构：[monster1(7) + monster2(7) + treasure(12) + buff(8)]
-        monster1_feat = entities_feat[0:7]
-        monster2_feat = entities_feat[7:14]
-        treasure_feat = entities_feat[14:26]
-        buff_feat = entities_feat[26:34]
-        
-        # 按照模型期望的 9 个分组拼接特征
-        # 顺序必须与 Config.FEATURE_SPLIT_SHAPE 的 9 项对应
-        feature = np.concatenate(
-            [
-                hero_enhanced_feat,      # self_dim (24D)
-                monster1_feat,           # monster1_dim (7D)
-                monster2_feat,           # monster2_dim (7D)
-                treasure_feat,           # treasure_dim (12D)
-                buff_feat,               # buff_dim (8D)
-                decision_auxiliary_feat, # progress_dim (20D)
-                map_and_paths_feat,      # map_dim (35D)
-                temporal_memory_feat,    # plan_dim (30D)
-                np.array(legal_action, dtype=np.float32),  # legal_dim (16D)
-            ]
-        )
+        # 按照模型期望的 10 个分组拼接特征
+        # 顺序必须与 Config.FEATURE_SPLIT_SHAPE 的 10 项对应
         
         # 更新内存用于下一步
         self._update_memory(
@@ -1116,7 +1112,8 @@ class Preprocessor:
             last_action=last_action,
         )
         
-        # ===== 动作质量评估（可选的监控特征，不改变模型输入） =====
+        # ===== 动作质量评估（正式集成到模型输入的第10维） =====
+        action_quality_features = None
         try:
             from agent_ppo.feature.action_quality import compute_action_quality_features
             
@@ -1125,6 +1122,7 @@ class Preprocessor:
             hero_hp = float(hero.get("hero_hp", hero_hp)) if hero_hp == 0.0 else hero_hp
             
             # 计算动作质量评估 (96D: 16 动作 × 6 维度)
+            # 使用hero_pos_history (存储实际{x,z}位置) 而不是trajectory_history (存储coarse_cell)
             action_quality_features = compute_action_quality_features(
                 hero_pos=hero_pos,
                 hero_hp=hero_hp,
@@ -1134,16 +1132,36 @@ class Preprocessor:
                 buffs=[b for b in buffs],
                 legal_action_mask=np.array(legal_action, dtype=np.float32),
                 local_map=map_info,
-                recent_positions=list(self.trajectory_history) if self.trajectory_history else None,
+                recent_positions=list(self.hero_pos_history) if self.hero_pos_history else None,
                 flash_cooldown=int(flash_cd),
                 danger_trend=self.danger_trend_value,
             )
             
-            # 添加到reward_info中供监控和调试
             reward_info["action_quality_features"] = action_quality_features
+            reward_info["action_quality_computed"] = True
         except Exception as e:
-            # 如果action_quality计算失败，仍然继续（这是可选特征）
-            pass
+            # 动作质量评估是可选特征，计算失败时记录警告并使用默认值继续
+            logger.warning(f"Action quality assessment failed: {type(e).__name__}: {str(e)[:200]}")
+            reward_info["action_quality_error"] = str(e)[:100]
+            reward_info["action_quality_computed"] = False
+            # 使用全0特征向量作该退化处理
+            action_quality_features = np.zeros(96, dtype=np.float32)
+        
+        # 拼接完整的255D特征向量（包含action_quality）
+        feature = np.concatenate(
+            [
+                hero_enhanced_feat,      # self_dim (24D)
+                monster1_feat,           # monster1_dim (7D)
+                monster2_feat,           # monster2_dim (7D)
+                treasure_feat,           # treasure_dim (12D)
+                buff_feat,               # buff_dim (8D)
+                decision_auxiliary_feat, # progress_dim (20D)
+                map_and_paths_feat,      # map_dim (35D)
+                temporal_memory_feat,    # plan_dim (30D)
+                np.array(legal_action, dtype=np.float32),  # legal_dim (16D)
+                action_quality_features,  # action_quality_dim (96D) - 新增
+            ]
+        )
 
         return feature, legal_action, [reward_total], reward_info
 

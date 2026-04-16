@@ -307,15 +307,15 @@ class GlobalSituationFusion(nn.Module):
     """Fuse all understanding into global situation assessment.
     
     融合所有理解形成全局局势评估。
-    输入: threat_fusion(128D) + opportunity_fusion(128D) + legal(16D) = 272D
+    输入: threat_fusion(128D) + opportunity_fusion_with_action_quality(192D) + legal(16D) = 336D
     输出: 192D (最大的中间表示)
     """
-    def __init__(self, input_dim=272, hidden_dim=200, output_dim=192):
+    def __init__(self, input_dim=336, hidden_dim=256, output_dim=192):
         super().__init__()
         self.fusion = FusionBlock(input_dim, hidden_dim, output_dim)
 
-    def forward(self, threat_fusion, opportunity_fusion, legal_feat):
-        return self.fusion(threat_fusion, opportunity_fusion, legal_feat)
+    def forward(self, threat_fusion, opportunity_fusion_with_action_quality, legal_feat):
+        return self.fusion(threat_fusion, opportunity_fusion_with_action_quality, legal_feat)
 
 
 # ============================================================================
@@ -501,10 +501,11 @@ class ModelV2(nn.Module):
             self.map_dim,
             self.plan_dim,
             self.legal_dim,
+            self.action_quality_dim,
         ) = Config.FEATURE_SPLIT_SHAPE
 
         # ====================================================================
-        # Stage 1: Input Encoding Layer (6 encoders)
+        # Stage 1: Input Encoding Layer (7 encoders - 新增action_quality_encoder)
         # ====================================================================
         self.hero_encoder = HeroStateEncoder(
             input_dim=self.self_dim,
@@ -541,6 +542,14 @@ class ModelV2(nn.Module):
             input_dim=self.legal_dim,
             output_dim=16
         )
+        
+        # 新增：动作质量编码器 - 处理96D的动作质量特征
+        self.action_quality_encoder = nn.Sequential(
+            nn.Linear(self.action_quality_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+        )
 
         # ====================================================================
         # Stage 2: Situation Understanding Layer (3 fusion blocks)
@@ -565,9 +574,11 @@ class ModelV2(nn.Module):
             hidden_dim_style=64,
         )
         
+        # 修改global_fusion以处理扩展的opportunity维度（结合action_quality）
+        # 输入: threat_fusion(128D) + opportunity_fusion_with_action_quality(192D) + legal(16D)
         self.global_fusion = GlobalSituationFusion(
-            input_dim=128 + 128 + 16,  # threat_fusion + opportunity_fusion + legal
-            hidden_dim=200,
+            input_dim=128 + 192 + 16,  # threat_fusion + opportunity_with_action_quality + legal
+            hidden_dim=256,
             output_dim=192
         )
 
@@ -590,7 +601,7 @@ class ModelV2(nn.Module):
         """Forward pass through the complete model.
         
         Args:
-            obs: [batch_size, 159] - input features (9 groups)
+            obs: [batch_size, 255] - input features (10 groups, expanded with action_quality)
             inference: bool - inference mode flag (unused for now, for compatibility)
         
         Returns:
@@ -598,7 +609,7 @@ class ModelV2(nn.Module):
             value: [batch_size, 1] - state value
         """
         
-        # Split input into 9 feature groups
+        # Split input into 10 feature groups
         (
             self_feat,
             monster1,
@@ -608,11 +619,12 @@ class ModelV2(nn.Module):
             progress,
             map_local,
             action_plan,
-            legal
+            legal,
+            action_quality  # 新增第10个维度
         ) = torch.split(obs, Config.FEATURE_SPLIT_SHAPE, dim=1)
         
         # ====================================================================
-        # Stage 1: Input Encoding
+        # Stage 1: Input Encoding (7 encoders)
         # ====================================================================
         hero_encoded = self.hero_encoder(self_feat)                 # [batch, 64]
         map_encoded = self.map_encoder(map_local)                   # [batch, 64]
@@ -624,6 +636,9 @@ class ModelV2(nn.Module):
         
         temporal_encoded = self.temporal_encoder(action_plan)       # [batch, 96]
         legal_encoded = self.legal_encoder(legal)                   # [batch, 16]
+        
+        # 新增：编码动作质量特征
+        action_quality_encoded = self.action_quality_encoder(action_quality)  # [batch, 64]
         
         # ====================================================================
         # Stage 2: Situation Understanding (with explicit risk-reward fusion)
@@ -651,10 +666,14 @@ class ModelV2(nn.Module):
         # Returns: 3x[batch, 32] representations + [batch, 96] combined
         # This provides explicit intermediate semantic: risk_level, opportunity, decision_style
         
-        # Global situation: integrate all understanding
+        # 融合action_quality到决策过程（通过与opportunity的组合）
+        # Action quality represents immediate action consequence - fuse with decision
+        opportunity_with_action_quality = torch.cat([opportunity_fusion_output, action_quality_encoded], dim=-1)  # [batch, 192]
+        
+        # Global situation: integrate all understanding (including action quality)
         global_situation = self.global_fusion(
             threat_fusion_output,
-            opportunity_fusion_output,
+            opportunity_with_action_quality,
             legal_encoded
         )  # [batch, 192] - Final situation assessment
         

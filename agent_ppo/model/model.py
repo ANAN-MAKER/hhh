@@ -227,6 +227,7 @@ class Model(nn.Module):
             self.map_dim,
             self.plan_dim,
             self.legal_dim,
+            self.action_quality_dim,
         ) = Config.FEATURE_SPLIT_SHAPE
 
         # ====================================================================
@@ -298,7 +299,7 @@ class Model(nn.Module):
         # ====================================================================
         # 特征分割
         # ====================================================================
-        self_feat, monster1, monster2, treasure, buff, progress, map_local, action_plan, legal = torch.split(
+        self_feat, monster1, monster2, treasure, buff, progress, map_local, action_plan, legal, action_quality = torch.split(
             obs, Config.FEATURE_SPLIT_SHAPE, dim=1
         )
 

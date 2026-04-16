@@ -214,7 +214,8 @@ class EpisodeRunner:
                         f"[GAMEOVER] episode:{self.episode_cnt} steps:{step} "
                         f"result:{result_str} score:{total_score:.1f} "
                         f"treasure:{treasures_collected}/{total_treasure} "
-                        f"total_reward:{total_reward:.3f}"
+                        f"total_reward:{total_reward:.3f} "
+                        f"| Layer_A:{layer_a_total:.3f} Layer_B:{layer_b_total:.3f} Layer_C:{layer_c_total:.3f}"
                     )
 
                 # Build sample frame / 构造样本帧

@@ -29,8 +29,8 @@ class Config:
         16,  # legal_action_as_feature 合法动作掩码
     ]
     
-    # 模型期望的 9 个分组（兼容原有模型架构）
-    # 映射: [A分解, B分解*3, E作进度, C作地图, D作规划, 合法]
+    # 模型期望的 10 个分组（扩展以包含action_quality）
+    # 映射: [A分解, B分解*3, E作进度, C作地图, D作规划, legal, action_quality]
     FEATURE_SPLIT_SHAPE = [
         24,  # self_dim: A的完整部分（自身状态）
         7,   # monster1_dim: B的怪物部分的一半
@@ -41,10 +41,11 @@ class Config:
         35,  # map_dim: C的完整部分（地图与路径）
         30,  # plan_dim: D作为时序规划信息
         16,  # legal_dim: 合法动作掩码
+        96,  # action_quality_dim: 动作质量评估 (16动作×6维度)
     ]
     
-    FEATURE_LEN = sum(FEATURE_SPLIT_SHAPE)  # 159维
-    DIM_OF_OBSERVATION = FEATURE_LEN  # 网络输入维度: 159D
+    FEATURE_LEN = sum(FEATURE_SPLIT_SHAPE)  # 255维（从159D扩展）
+    DIM_OF_OBSERVATION = FEATURE_LEN  # 网络输入维度: 255D
 
     # Action space / 动作空间：8个移动方向 + 8个闪现方向
     ACTION_NUM = 16

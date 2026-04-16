@@ -216,7 +216,7 @@ try:
     
     # 检查FEATURE_SPLIT_SHAPE的总和
     total_dims = sum(Config.FEATURE_SPLIT_SHAPE)
-    assert total_dims == 159, f"特征总维度错误: {total_dims} != 159"
+    assert total_dims == 255, f"特征总维度错误: {total_dims} != 255"
     
     # 打印特征分布
     print(f"  ✓ 特征维度验证通过 (总计: {total_dims}D)")
@@ -250,6 +250,6 @@ print("  6. ✓ preprocessor.py: 集成spatial_utils和action_quality")
 
 print("\n最终信息流：")
 print("  环境观测(128,128) → 空间对齐 → 特征编码(159D) → 动作质量评估(96D)")
-print("  → 风险收益融合(96D) → 主干网络 → Policy(16D) / Value(1D)")
+print("  → 完整输入(255D) → 风险收益融合(96D) → 主干网络 → Policy(16D) / Value(1D)")
 print("\nPPO 训练接口保持不变，16维动作输出不变，标准PPO loss不变")
 print("="*80 + "\n")
