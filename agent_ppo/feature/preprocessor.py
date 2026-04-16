@@ -67,31 +67,16 @@ def _signed_norm(v, v_abs_max):
     return float(np.clip(float(v) / max(float(v_abs_max), 1e-6), -1.0, 1.0))
 
 
-def _safe_pos(obj):
-    """从对象中安全地提取位置信息 - 使用 spatial_utils 的统一实现"""
-    return extract_safe_pos(obj)
-
-
 def _distance(pos_a, pos_b):
     """计算两点之间的距离。"""
     _, _, dist = relative_pos(pos_a, pos_b, MAP_SIZE)
     return float(dist)
 
 
-def _coarse_cell(pos):
-    """将位置量化到粗粒度网格 - 使用 spatial_utils 的统一实现"""
-    return quantize_to_coarse_cell(pos, cell_size=COARSE_CELL_SIZE, map_size=MAP_SIZE)
-
-
-def _apply_action(pos, action_idx):
-    """应用动作到位置。使用统一的 spatial_utils 实现。"""
-    return apply_action_to_pos(pos, action_idx, MAP_SIZE)
-
-
 def _sorted_entities_by_distance(hero_pos, entities):
     enriched = []
     for entity in entities:
-        entity_pos = _safe_pos(entity)
+        entity_pos = extract_safe_pos(entity)
         enriched.append((_distance(hero_pos, entity_pos), entity, entity_pos))
     enriched.sort(key=lambda item: item[0])
     return enriched
@@ -443,19 +428,19 @@ class Preprocessor:
         direction_quality = []
         
         for action_idx in range(8):  # 只看移动，不看闪现
-            next_pos = _apply_action(hero_pos, action_idx)
+            next_pos = apply_action_to_pos(hero_pos, action_idx, MAP_SIZE)
             
             # 1) 安全性：离怪物的距离
             if monsters:
-                next_min_monster = min(_distance(next_pos, _safe_pos(m)) for m in monsters)
+                next_min_monster = min(_distance(next_pos, extract_safe_pos(m)) for m in monsters)
                 safety = _norm(next_min_monster, MAP_DIAG)
             else:
                 safety = 1.0
             
             # 2) 宝箱收益
             if treasures:
-                next_nearest_treasure = min(_distance(next_pos, _safe_pos(t)) for t in treasures)
-                cur_nearest_treasure = min(_distance(hero_pos, _safe_pos(t)) for t in treasures)
+                next_nearest_treasure = min(_distance(next_pos, extract_safe_pos(t)) for t in treasures)
+                cur_nearest_treasure = min(_distance(hero_pos, extract_safe_pos(t)) for t in treasures)
                 treasure_reward = _norm(max(0, cur_nearest_treasure - next_nearest_treasure), 10.0)
             else:
                 treasure_reward = 0.0
@@ -642,7 +627,7 @@ class Preprocessor:
         treasure_reachability = max(0.0, 1.0 - nearest_treasure_dist_norm * 0.5)
         
         if buffs:
-            buff_distances = [_distance(hero_pos, _safe_pos(b)) for b in buffs]
+            buff_distances = [_distance(hero_pos, extract_safe_pos(b)) for b in buffs]
             buff_reachability = max(0.0, 1.0 - min(buff_distances) / MAP_DIAG * 0.5)
         else:
             buff_reachability = 0.0
@@ -659,15 +644,15 @@ class Preprocessor:
             best_flash_benefit = 0.0
             best_flash_safety = 0.0
             for action_idx in range(8, 16):  # 闪现方向
-                flash_pos = _apply_action(hero_pos, action_idx)
+                flash_pos = apply_action_to_pos(hero_pos, action_idx, MAP_SIZE)
                 if monsters:
-                    flash_min_dist = min(_distance(flash_pos, _safe_pos(m)) for m in monsters)
+                    flash_min_dist = min(_distance(flash_pos, extract_safe_pos(m)) for m in monsters)
                     flash_safety = _norm(flash_min_dist, MAP_DIAG)
                 else:
                     flash_safety = 1.0
                 
                 if treasures:
-                    flash_treasure_dist = min(_distance(flash_pos, _safe_pos(t)) for t in treasures)
+                    flash_treasure_dist = min(_distance(flash_pos, extract_safe_pos(t)) for t in treasures)
                     benefit = max(0, nearest_treasure_dist_norm - flash_treasure_dist / MAP_DIAG)
                 else:
                     benefit = 0.0
@@ -896,8 +881,8 @@ class Preprocessor:
         self.max_step = env_info.get("max_step", 200)
 
         hero = frame_state["heroes"]
-        hero_pos = _safe_pos(hero)
-        hero_cell = _coarse_cell(hero_pos)
+        hero_pos = extract_safe_pos(hero)
+        hero_cell = quantize_to_coarse_cell(hero_pos, cell_size=COARSE_CELL_SIZE, map_size=MAP_SIZE)
         flash_cd = float(hero.get("flash_cooldown", 0.0))
         buff_remain = float(hero.get("buff_remaining_time", 0.0))
         
@@ -922,7 +907,7 @@ class Preprocessor:
         
         # 计算最近宝箱距离用于后续特征构建
         if treasures:
-            nearest_treasure_dist = min(_distance(hero_pos, _safe_pos(t)) for t in treasures)
+            nearest_treasure_dist = min(_distance(hero_pos, extract_safe_pos(t)) for t in treasures)
             nearest_treasure_dist_norm = _norm(nearest_treasure_dist, MAP_DIAG)
         else:
             nearest_treasure_dist_norm = 1.0
@@ -1001,14 +986,14 @@ class Preprocessor:
             last_action=last_action,
         )
         
-        # ===== 动作质量评估（正式集成到模型输入的第10维） =====
-        action_quality_features = None
+        # ===== 动作质量评估（必须成功，严格模式） =====
+        # 与reward_system_v2相同，不支持降级到默认值
+        from agent_ppo.feature.action_quality import compute_action_quality_features
+        
+        # 获取英雄当前血量（用于动作质量评估）— 使用统一的提取函数
+        hero_hp, _ = _extract_hero_hp_info(hero)
+        
         try:
-            from agent_ppo.feature.action_quality import compute_action_quality_features
-            
-            # 获取英雄当前血量（用于动作质量评估）— 使用统一的提取函数
-            hero_hp, _ = _extract_hero_hp_info(hero)
-            
             # 计算动作质量评估 (96D: 16 动作 × 6 维度)
             # 使用hero_pos_history (存储实际{x,z}位置) 而不是trajectory_history (存储coarse_cell)
             action_quality_features = compute_action_quality_features(
@@ -1024,16 +1009,11 @@ class Preprocessor:
                 flash_cooldown=int(flash_cd),
                 danger_trend=self.danger_trend_value,
             )
-            
-            reward_info["action_quality_features"] = action_quality_features
             reward_info["action_quality_computed"] = True
         except Exception as e:
-            # 动作质量评估是可选特征，计算失败时记录警告并使用默认值继续
-            logger.warning(f"Action quality assessment failed: {type(e).__name__}: {str(e)[:200]}")
-            reward_info["action_quality_error"] = str(e)[:100]
-            reward_info["action_quality_computed"] = False
-            # 使用全0特征向量作该退化处理
-            action_quality_features = np.zeros(96, dtype=np.float32)
+            # 严格模式：action_quality计算失败则抛出RuntimeError，不支持任何降级处理
+            logger.error(f"Action quality computation FAILED (strict mode): {type(e).__name__}: {str(e)}")
+            raise RuntimeError(f"Action quality features extraction failed: {str(e)}") from e
         
         # 拼接完整的255D特征向量（包含action_quality）
         feature = np.concatenate(
@@ -1043,11 +1023,11 @@ class Preprocessor:
                 monster2_feat,           # monster2_dim (7D)
                 treasure_feat,           # treasure_dim (12D)
                 buff_feat,               # buff_dim (8D)
-                decision_auxiliary_feat, # progress_dim (20D)
+                decision_auxiliary_feat, # decision_auxiliary_dim (20D)
                 map_and_paths_feat,      # map_dim (35D)
-                temporal_memory_feat,    # plan_dim (30D)
+                temporal_memory_feat,    # temporal_memory_dim (30D)
                 np.array(legal_action, dtype=np.float32),  # legal_dim (16D)
-                action_quality_features,  # action_quality_dim (96D) - 新增
+                action_quality_features,  # action_quality_dim (96D)
             ]
         )
 
