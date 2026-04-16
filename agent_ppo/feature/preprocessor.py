@@ -18,27 +18,20 @@ import numpy as np
 # 配置日志
 logger = logging.getLogger(__name__)
 
-# 导入新的三层奖励系统
-try:
-    from agent_ppo.feature.reward_system_v2 import compute_reward_three_layer
-    USE_NEW_REWARD_SYSTEM = True
-except ImportError:
-    USE_NEW_REWARD_SYSTEM = False
+# 导入新的三层奖励系统（必须成功）
+from agent_ppo.feature.reward_system_v2 import compute_reward_three_layer
 
-# 导入统一的空间工具库
-try:
-    from agent_ppo.feature.spatial_utils import (
-        apply_action_to_pos,
-        relative_pos,
-        action_to_delta,
-        get_direction_ahead_in_local_map,
-        ACTION_ID_TO_DELTA,
-        ACTION_ID_TO_OPPOSITE,
-    )
-    USE_SPATIAL_UTILS = True
-except ImportError:
-    USE_SPATIAL_UTILS = False
-    logger.warning("Failed to import spatial_utils, falling back to local implementations")
+# 导入统一的空间工具库（必须成功，不支持降级）
+from agent_ppo.feature.spatial_utils import (
+    apply_action_to_pos,
+    relative_pos,
+    action_to_delta,
+    get_direction_ahead_in_local_map,
+    extract_safe_pos,
+    quantize_to_coarse_cell,
+    ACTION_ID_TO_DELTA,
+    ACTION_ID_TO_OPPOSITE,
+)
 
 # Map size / 地图尺寸（128×128）
 MAP_SIZE = 128.0
@@ -75,11 +68,8 @@ def _signed_norm(v, v_abs_max):
 
 
 def _safe_pos(obj):
-    pos = obj.get("pos", {}) if isinstance(obj, dict) else {}
-    return {
-        "x": float(pos.get("x", 0.0)),
-        "z": float(pos.get("z", 0.0)),
-    }
+    """从对象中安全地提取位置信息 - 使用 spatial_utils 的统一实现"""
+    return extract_safe_pos(obj)
 
 
 def _distance(pos_a, pos_b):
@@ -89,10 +79,8 @@ def _distance(pos_a, pos_b):
 
 
 def _coarse_cell(pos):
-    return (
-        int(np.clip(pos["x"], 0.0, MAP_SIZE - 1.0) // COARSE_CELL_SIZE),
-        int(np.clip(pos["z"], 0.0, MAP_SIZE - 1.0) // COARSE_CELL_SIZE),
-    )
+    """将位置量化到粗粒度网格 - 使用 spatial_utils 的统一实现"""
+    return quantize_to_coarse_cell(pos, cell_size=COARSE_CELL_SIZE, map_size=MAP_SIZE)
 
 
 def _apply_action(pos, action_idx):
@@ -113,20 +101,32 @@ def _extract_hero_hp_info(hero_dict):
     """
     统一提取英雄的血量信息（hp 和 max_hp）。
     
-    读取优先级：
-    - hp: 优先使用 hero_dict["hp"]，如果不存在则尝试 hero_dict["hero_hp"]
-    - max_hp: 使用 hero_dict["max_hp"]，如果不存在默认为 100.0
+    这是唯一的官方血量读取入口，确保全项目一致性。
+    
+    读取优先级（hp）：
+        1. hero_dict["hp"] - 首选
+        2. hero_dict["hero_hp"] - 备选（если hp=0）
+        3. 0.0 - 最后缺省（表示英雄可能已死）
+    
+    读取优先级（max_hp）：
+        1. hero_dict["max_hp"] - 标准字段
+        2. 100.0 - 缺省值（通常游戏英雄血量上限）
+    
+    注意：action_quality 模块会在hp为0时使用保守策略评估
     
     Returns:
         (hero_hp, hero_max_hp): 元组，两个值都是 float
     """
-    # 读取 hp，优先级: hp > hero_hp > 0.0
+    # 读取当前血量，优先级: hp > hero_hp > 0.0
     hero_hp = float(hero_dict.get("hp", 0.0))
     if hero_hp == 0.0:
         hero_hp = float(hero_dict.get("hero_hp", 0.0))
     
-    # 读取 max_hp，默认值 100.0
+    # 读取最大血量，缺省值 100.0（标准值）
+    # 如果值异常小（<1.0），取缺省值
     hero_max_hp = float(hero_dict.get("max_hp", 100.0))
+    if hero_max_hp < 1.0:
+        hero_max_hp = 100.0
     
     return hero_hp, hero_max_hp
 
@@ -783,173 +783,80 @@ class Preprocessor:
         total_treasure = int(env_info.get("total_treasure", 1))
         buff_remain = float(env_info.get("buff_remaining_time", 0.0))
         
-        # ====== 尝试使用新的三层奖励系统 ======
-        if USE_NEW_REWARD_SYSTEM:
-            try:
-                # 判断是否死亡 (通过检查是否还有怪物在追)
-                is_dead = env_info.get("is_dead", False)
+        # ====== 使用新的三层奖励系统（严格模式）======
+        try:
+            # 判断是否死亡
+            is_dead = env_info.get("is_dead", False)
+            
+            reward_total, reward_details = compute_reward_three_layer(
+                # 环境信息
+                step_no=self.step_no,
+                max_step=self.max_step,
+                is_dead=is_dead,
                 
-                reward_total, reward_details = compute_reward_three_layer(
-                    # 环境信息
-                    step_no=self.step_no,
-                    max_step=self.max_step,
-                    is_dead=is_dead,
-                    
-                    # 距离信息
-                    cur_min_monster_dist_norm=cur_min_monster_dist_norm,
-                    last_min_monster_dist_norm=self.last_min_monster_dist_norm,
-                    nearest_treasure_dist_norm=nearest_treasure_dist_norm,
-                    last_nearest_treasure_dist_norm=self.last_nearest_treasure_dist_norm,
-                    
-                    # 收集信息
-                    treasures_collected=treasures_collected,
-                    total_treasure=total_treasure,
-                    collected_buff=collected_buff,
-                    total_buff=total_buff,
-                    buff_remain=buff_remain,
-                    flash_count=flash_count,
-                    last_flash_count=self.last_flash_count,
-                    
-                    # 行为信息
-                    move_dist=move_dist,
-                    hero_cell=hero_cell,
-                    recent_cells=self.recent_cells,
-                    visit_counter=self.visit_counter,
-                    prev_action=self.prev_action,
-                    last_action=last_action,
-                    
-                    # 可选：上一步的收集数据
-                    last_treasures_collected=self.last_treasure_count,
-                    last_collected_buff=self.last_buff_count,
-                )
+                # 距离信息
+                cur_min_monster_dist_norm=cur_min_monster_dist_norm,
+                last_min_monster_dist_norm=self.last_min_monster_dist_norm,
+                nearest_treasure_dist_norm=nearest_treasure_dist_norm,
+                last_nearest_treasure_dist_norm=self.last_nearest_treasure_dist_norm,
                 
-                # 合并旧的 reward_info 兼容格式
-                reward_info = {
-                    # 新系统的详细拆分
-                    "survival_reward": reward_details.get("survival_reward", 0.0),
-                    "score_objective": reward_details.get("score_objective", 0.0),
-                    "layer_a": reward_details.get("layer_a", 0.0),
-                    "distance_shaping": reward_details.get("distance_shaping", 0.0),
-                    "danger_zone_penalty": reward_details.get("danger_zone_penalty", 0.0),
-                    "buff_bonus": reward_details.get("buff_bonus", 0.0),
-                    "flash_escape_bonus": reward_details.get("flash_escape_bonus", 0.0),
-                    "layer_b": reward_details.get("layer_b", 0.0),
-                    "movement_penalty": reward_details.get("movement_penalty", 0.0),
-                    "loop_penalty": reward_details.get("loop_penalty", 0.0),
-                    "wasteful_flash_penalty": reward_details.get("wasteful_flash_penalty", 0.0),
-                    "layer_c": reward_details.get("layer_c", 0.0),
-                    
-                    # 兼容旧系统的格式
-                    "reward_total": reward_total,
-                    "min_monster_dist_norm": cur_min_monster_dist_norm,
-                    "nearest_treasure_dist_norm": nearest_treasure_dist_norm,
-                }
+                # 收集信息
+                treasures_collected=treasures_collected,
+                total_treasure=total_treasure,
+                collected_buff=collected_buff,
+                total_buff=total_buff,
+                buff_remain=buff_remain,
+                flash_count=flash_count,
+                last_flash_count=self.last_flash_count,
                 
-                return reward_total, reward_info
+                # 行为信息
+                move_dist=move_dist,
+                hero_cell=hero_cell,
+                recent_cells=self.recent_cells,
+                visit_counter=self.visit_counter,
+                prev_action=self.prev_action,
+                last_action=last_action,
                 
-            except Exception as e:
-                # 新系统出错，降级到旧系统（保守模式）
-                # 使用高亮日志确保实验人员注意到这个重要的系统切换
-                logger.critical(
-                    f"[REWARD SYSTEM FALLBACK] New reward_system_v2 failed: {type(e).__name__}: {e}\n"
-                    f"  Switching to legacy reward system. Please verify this is intentional.\n"
-                    f"  Details: {str(e)[-100:]}"
-                )
-                USE_NEW_REWARD_SYSTEM = False
-        
-        # ====== 降级到旧的奖励系统（向后兼容） ======
-        treasure_delta = treasures_collected - self.last_treasure_count
-        buff_delta = collected_buff - self.last_buff_count
-        flash_delta = flash_count - self.last_flash_count
-        score_delta = float(env_info.get("total_score", 0.0)) - self.last_total_score
-
-        survive_reward = 0.010
-        dist_shaping = 0.22 * (cur_min_monster_dist_norm - self.last_min_monster_dist_norm)
-        emergency_escape_reward = 0.0
-        if self.last_min_monster_dist_norm < 0.18:
-            emergency_escape_reward = 0.35 * max(0.0, cur_min_monster_dist_norm - self.last_min_monster_dist_norm)
-
-        treasure_pickup_reward = 8.0 * max(0, treasure_delta)
-
-        treasure_approach_reward = 0.0
-        if nearest_treasure_dist_norm < 1.0 and cur_min_monster_dist_norm > 0.16:
-            treasure_approach_reward = 0.45 * (self.last_nearest_treasure_dist_norm - nearest_treasure_dist_norm)
-
-        buff_reward = 1.0 * max(0, buff_delta)
-        score_gain_reward = 0.015 * max(0.0, score_delta)
-
-        is_new_cell = hero_cell not in self.visited_cells
-        exploration_reward = 0.05 if is_new_cell else 0.0
-
-        repeat_count = sum(1 for cell in self.recent_cells if cell == hero_cell) + 1
-        stuck_score = self._stuck_score(hero_cell)
-        safe_for_anti_loop = cur_min_monster_dist_norm > 0.22
-
-        loiter_penalty = 0.0
-        if safe_for_anti_loop:
-            if move_dist < 0.5:
-                loiter_penalty -= 0.12
-            loiter_penalty -= 0.035 * max(0, repeat_count - 2)
-            loiter_penalty -= 0.15 * stuck_score
-            if (
-                self.prev_action in ACTION_ID_TO_OPPOSITE
-                and last_action in ACTION_ID_TO_OPPOSITE
-                and ACTION_ID_TO_OPPOSITE[last_action] == self.prev_action
-            ):
-                loiter_penalty -= 0.025
-
-        flash_reward = 0.0
-        if flash_delta > 0:
-            emergency_flash = (
-                self.last_min_monster_dist_norm < 0.18
-                and cur_min_monster_dist_norm > self.last_min_monster_dist_norm + 0.04
+                # 可选：上一步的收集数据
+                last_treasures_collected=self.last_treasure_count,
+                last_collected_buff=self.last_buff_count,
             )
-            greedy_flash = (
-                self.last_nearest_treasure_dist_norm - nearest_treasure_dist_norm > 0.10
-                and cur_min_monster_dist_norm > 0.25
-            )
-            if emergency_flash:
-                flash_reward += 0.45
-            elif greedy_flash:
-                flash_reward += 0.25
-            else:
-                flash_reward -= 0.30
-
-        reward_total = float(
-            np.clip(
-                survive_reward
-                + dist_shaping
-                + emergency_escape_reward
-                + treasure_pickup_reward
-                + treasure_approach_reward
-                + buff_reward
-                + score_gain_reward
-                + exploration_reward
-                + loiter_penalty
-                + flash_reward,
-                -6.0,
-                6.0,
-            )
-        )
-
-        reward_info = self._make_reward_info(
-            survive_reward=survive_reward,
-            dist_shaping=dist_shaping,
-            emergency_escape_reward=emergency_escape_reward,
-            treasure_pickup_reward=treasure_pickup_reward,
-            treasure_approach_reward=treasure_approach_reward,
-            buff_reward=buff_reward,
-            score_gain_reward=score_gain_reward,
-            exploration_reward=exploration_reward,
-            loiter_penalty=loiter_penalty,
-            flash_reward=flash_reward,
-            reward_total=reward_total,
-            min_monster_dist_norm=cur_min_monster_dist_norm,
-            nearest_treasure_dist_norm=nearest_treasure_dist_norm,
-            stuck_score=stuck_score,
-            move_dist=move_dist,
-        )
-        return reward_total, reward_info
+            
+            # 构建奖励信息（包含三层详细拆分）
+            reward_info = {
+                # 新系统的详细拆分
+                "survival_reward": reward_details.get("survival_reward", 0.0),
+                "score_objective": reward_details.get("score_objective", 0.0),
+                "layer_a": reward_details.get("layer_a", 0.0),
+                "distance_shaping": reward_details.get("distance_shaping", 0.0),
+                "danger_zone_penalty": reward_details.get("danger_zone_penalty", 0.0),
+                "buff_bonus": reward_details.get("buff_bonus", 0.0),
+                "flash_escape_bonus": reward_details.get("flash_escape_bonus", 0.0),
+                "layer_b": reward_details.get("layer_b", 0.0),
+                "movement_penalty": reward_details.get("movement_penalty", 0.0),
+                "loop_penalty": reward_details.get("loop_penalty", 0.0),
+                "wasteful_flash_penalty": reward_details.get("wasteful_flash_penalty", 0.0),
+                "layer_c": reward_details.get("layer_c", 0.0),
+                
+                # 兼容旧系统的格式
+                "reward_total": reward_total,
+                "min_monster_dist_norm": cur_min_monster_dist_norm,
+                "nearest_treasure_dist_norm": nearest_treasure_dist_norm,
+            }
+            
+            return reward_total, reward_info
+            
+        except Exception as e:
+            # 严格模式：新奖励系统报错直接停止，不自动降级
+            # 这确保实验口径一致，避免某次step的报错导致整次训练切换系统
+            raise RuntimeError(
+                f"[REWARD SYSTEM ERROR - STRICT MODE] New reward_system_v2 failed at step {self.step_no}:\n"
+                f"  Type: {type(e).__name__}\n"
+                f"  Message: {e}\n"
+                f"  Reward system errors are fatal in development mode.\n"
+                f"  Please fix the issue and retry training.\n"
+                f"  Details: {str(e)[-200:]}"
+            ) from e
 
     def _update_memory(
         self,

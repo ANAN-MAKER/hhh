@@ -602,6 +602,70 @@ def get_angular_distance_to_action(
     return best_action_id, float(best_angle_diff)
 
 
+# ============================================================================
+# 坐标过滤和量化辅助函数
+# ============================================================================
+
+def extract_safe_pos(obj: Dict[str, any], default_pos: Optional[Dict[str, float]] = None) -> Dict[str, float]:
+    """
+    从对象中安全地提取位置信息 (x, z)。
+    
+    处理缺失或无效的位置数据，返回规范化的 {x, z} 位置字典。
+    
+    Args:
+        obj: 包含位置信息的对象（通常是字典，如环境中的怪物、宝藏等）
+        default_pos: 如果提取失败时的默认位置
+    
+    Returns:
+        {x, z} 字典，两个值都是 float
+    """
+    if default_pos is None:
+        default_pos = {"x": 0.0, "z": 0.0}
+    
+    if not isinstance(obj, dict):
+        return default_pos.copy()
+    
+    pos_data = obj.get("pos", {})
+    if not isinstance(pos_data, dict):
+        return default_pos.copy()
+    
+    return {
+        "x": float(pos_data.get("x", 0.0)),
+        "z": float(pos_data.get("z", 0.0)),
+    }
+
+
+def quantize_to_coarse_cell(
+    pos: Dict[str, float],
+    cell_size: float = 4.0,
+    map_size: float = MAP_SIZE,
+) -> Tuple[int, int]:
+    """
+    将连续坐标量化到粗粒度网格单元。
+    
+    用于路径记忆和访问计数，比连续坐标更稳定。
+    
+    Args:
+        pos: 位置字典 {x, z}
+        cell_size: 每个网格单元的大小
+        map_size: 地图总尺寸
+    
+    Returns:
+        (cell_i, cell_j): 网格单元坐标
+        
+    Example:
+        >>> quantize_to_coarse_cell({"x": 10, "z": 15}, cell_size=4.0)
+        (3, 2)  # 或近似值
+    """
+    x = float(pos.get("x", 0.0))
+    z = float(pos.get("z", 0.0))
+    
+    cell_i = int(np.clip(z, 0.0, map_size - 1.0) // cell_size)
+    cell_j = int(np.clip(x, 0.0, map_size - 1.0) // cell_size)
+    
+    return cell_i, cell_j
+
+
 if __name__ == "__main__":
     # 运行一致性检查
     consistency_check(verbose=True)
