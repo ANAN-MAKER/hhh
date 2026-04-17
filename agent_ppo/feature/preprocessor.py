@@ -31,6 +31,12 @@ from agent_ppo.feature.spatial_utils import (
     evaluate_direction_quality,
 )
 
+# 导入动作仿真器（Priority 1）- 替换固定delta的动作预测逻辑
+from agent_ppo.feature.action_simulator import simulate_action
+
+# 导入统一的masked policy分布工具（Priority 2）
+from agent_ppo.feature.mask_utils import softmax_numpy, softmax_torch
+
 # Map size / 地图尺寸（128×128）
 MAP_SIZE = 128.0
 MAP_DIAG = float(np.sqrt(MAP_SIZE**2 + MAP_SIZE**2))
