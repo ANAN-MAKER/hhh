@@ -66,5 +66,30 @@ class Config:
     GRAD_CLIP_RANGE = 0.5
     
     # PPO standard training (multi-epoch, multi-minibatch)
+    # === 修改 Task G ===
+    # 补全标准PPO训练所需的配置项
     PPO_EPOCHS = 4  # Number of epochs to train on the same batch
-    PPO_MINIBATCH_SIZE = 64  # Minibatch size for gradient updates
+    PPO_MINIBATCH_SIZE = 256  # Minibatch size for gradient updates (改为256以提高训练效率)
+    TARGET_KL = 0.02  # Target KL divergence for early stopping
+    MAX_GRAD_NORM = 0.5  # Gradient clipping threshold
+    NORMALIZE_ADVANTAGE = True  # Whether to normalize advantages
+    VALUE_CLIP_RANGE = 0.2  # Clipped value loss range
+    
+    # GRU features (for future support)
+    USE_GRU = False  # Whether to use GRU in model
+    GRU_HIDDEN_DIM = 128  # Hidden dimension of GRU
+    
+    # Critic architecture / 价值函数架构
+    USE_DUAL_CRITIC = False  # Whether to use dual-head critic (survival + treasure value)
+    
+    # Action plan features (Priority 1 enhancement)
+    # 动作候选特征维度
+    ACTION_PLAN_DIM_PER_ACTION = 6  # 每个动作的特征维度 (安全评分、收益、移动距离等)
+    ACTION_PLAN_TOTAL_DIM = 16 * ACTION_PLAN_DIM_PER_ACTION  # 16个动作×6维
+    
+    # Reward scaling (for reward system v2)
+    REWARD_SURVIVAL_SCALE = 1.0
+    REWARD_SCORE_SCALE = 1.0
+    REWARD_SHAPING_SCALE = 0.5
+    REWARD_EXPLORATION_SCALE = 0.3
+    REWARD_PENALTY_SCALE = 1.0

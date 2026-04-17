@@ -74,20 +74,30 @@ class Agent(BaseAgent):
         """Stochastic inference for training (exploration).
 
         训练时随机采样动作（探索）。
+        === 修改 Task B ===
+        现在使用统一的masked distribution，保存logprob供训练使用。
         """
         feature = list_obs_data[0].feature
         legal_action = list_obs_data[0].legal_action
 
-        logits, value, prob = self._run_model(feature, legal_action)
-
-        action = self._legal_sample(prob, use_max=False)
-        d_action = self._legal_sample(prob, use_max=True)
+        logits, value = self._run_model(feature, legal_action)
+        
+        # 构造masked分布（统一实现）
+        dist, prob = self._build_masked_dist(logits, legal_action)
+        
+        # 采样动作并计算logprob
+        action = dist.sample().item()
+        logprob = dist.log_prob(torch.tensor([action], device=self.device)).item()
+        
+        # 贪心动作（用于多步rollout或统计）
+        d_action = int(torch.argmax(dist.logits).item())
 
         return [
             ActData(
                 action=[action],
                 d_action=[d_action],
                 prob=list(prob),
+                logprob=logprob,
                 value=value,
             )
         ]
@@ -96,10 +106,22 @@ class Agent(BaseAgent):
         """Greedy inference for evaluation.
 
         评估时贪心选择动作（利用）。
+        === 修改 Task B ===
+        现在使用同一套_build_masked_dist（argmax模式）。
         """
         obs_data, _ = self.observation_process(env_obs)
-        act_data = self.predict([obs_data])
-        return self.action_process(act_data[0], is_stochastic=False)
+        feature = obs_data.feature
+        legal_action = obs_data.legal_action
+
+        logits, value = self._run_model(feature, legal_action)
+        
+        # 构造masked分布（统一实现）
+        dist, prob = self._build_masked_dist(logits, legal_action)
+        
+        # 贪心选择
+        action = torch.argmax(dist.logits).item()
+
+        return action
 
     def learn(self, list_sample_data):
         """Train the model.
@@ -165,9 +187,11 @@ class Agent(BaseAgent):
         return int(action[0])
 
     def _run_model(self, feature, legal_action):
-        """Run model inference, return logits, value, prob.
+        """Run model inference, return logits, value.
 
-        执行模型推理，返回 logits、value 和动作概率。
+        执行模型推理，返回 logits 和 value。
+        === 修改 Task B ===
+        不再在此计算概率，改由_build_masked_dist负责。
         """
         self.model.set_eval_mode()
         obs_tensor = torch.tensor(np.array([feature]), dtype=torch.float32).to(self.device)
@@ -178,17 +202,15 @@ class Agent(BaseAgent):
         logits_np = logits.cpu().numpy()[0]
         value_np = value.cpu().numpy()[0]
 
-        # Legal action masked softmax / 合法动作掩码 softmax
-        legal_action_np = np.array(legal_action, dtype=np.float32)
-        prob = self._legal_soft_max(logits_np, legal_action_np)
-
-        return logits_np, value_np, prob
+        return logits_np, value_np
 
     def _legal_soft_max(self, input_hidden, legal_action):
         """Softmax with legal action masking (numpy).
 
         合法动作掩码下的 softmax（numpy 版）。
-        现已使用统一的mask_utils.softmax_numpy确保一致性。
+        === 修改 Task B ===
+        现已弃用。改用_build_masked_dist基于PyTorch实现统一分布。
+        保留此方法仅供旧代码兼容。
         """
         return softmax_numpy(input_hidden, legal_action)
 
@@ -196,7 +218,40 @@ class Agent(BaseAgent):
         """Sample action from probability distribution.
 
         按概率分布采样动作。
+        === 修改 Task B ===
+        现已弃用。改用PyTorch Categorical分布采样。
         """
         if use_max:
             return int(np.argmax(probs))
         return int(np.argmax(np.random.multinomial(1, probs, size=1)))
+    
+    def _build_masked_dist(self, logits_np, legal_action):
+        """Build masked action distribution using PyTorch.
+        
+        使用PyTorch构造masked动作分布。
+        === 修改 Task B ===
+        统一的动作分布实现，同时供采样和训练使用。
+        
+        Args:
+            logits_np: numpy array of shape (16,)
+            legal_action: list of 0/1 indicating legal actions
+            
+        Returns:
+            (dist, prob_np): PyTorch distribution and numpy probability
+        """
+        import torch.distributions as dist_module
+        
+        logits_tensor = torch.tensor(logits_np, dtype=torch.float32).to(self.device)
+        legal_action_tensor = torch.tensor(legal_action, dtype=torch.float32).to(self.device)
+        
+        # Mask illegal actions with large negative values
+        masked_logits = logits_tensor + (legal_action_tensor - 1.0) * 1e10
+        
+        # Create Categorical distribution
+        dist = dist_module.Categorical(logits=masked_logits)
+        
+        # Get probabilities
+        probs = torch.nn.functional.softmax(masked_logits, dim=0)
+        prob_np = probs.cpu().detach().numpy()
+        
+        return dist, prob_np

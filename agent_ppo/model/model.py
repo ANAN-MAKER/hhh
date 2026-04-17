@@ -282,19 +282,53 @@ class Model(nn.Module):
         # ====================================================================
         # STAGE 4: 输出阶段 - 策略头和价值头
         # ====================================================================
-        # Actor head / 策略头
+        # Actor head / 策略头（16维动作）
         self.actor_head = nn.Sequential(
             make_fc_layer(128, 128, gain=nn.init.calculate_gain("relu")),
             nn.GELU(),
             make_fc_layer(128, action_num, gain=0.01),
         )
 
-        # Critic head / 价值头
-        self.critic_head = nn.Sequential(
-            make_fc_layer(128, 64, gain=nn.init.calculate_gain("relu")),
-            nn.GELU(),
-            make_fc_layer(64, value_num, gain=1.0),
-        )
+        # Critic head / 价值头（单头或双头）
+        # === 修改 Task F ===
+        # 添加双头critic以支持多任务价值估计
+        use_dual_critic = getattr(Config, 'USE_DUAL_CRITIC', False)
+        
+        if use_dual_critic:
+            # 双头critic模式：separate value for survival and treasure
+            self.value_survival = nn.Sequential(
+                make_fc_layer(128, 64, gain=nn.init.calculate_gain("relu")),
+                nn.GELU(),
+                make_fc_layer(64, value_num, gain=1.0),
+            )
+            self.value_treasure = nn.Sequential(
+                make_fc_layer(128, 64, gain=nn.init.calculate_gain("relu")),
+                nn.GELU(),
+                make_fc_layer(64, value_num, gain=1.0),
+            )
+            self.critic_head = None  # Not used in dual mode
+        else:
+            # 单头critic模式（默认）
+            self.critic_head = nn.Sequential(
+                make_fc_layer(128, 64, gain=nn.init.calculate_gain("relu")),
+                nn.GELU(),
+                make_fc_layer(64, value_num, gain=1.0),
+            )
+            self.value_survival = None  # Not used
+            self.value_treasure = None  # Not used
+        
+        # GRU support (预留接口) / === 修改 Task F ===
+        self.use_gru = getattr(Config, 'USE_GRU', False)
+        if self.use_gru:
+            gru_hidden_dim = getattr(Config, 'GRU_HIDDEN_DIM', 128)
+            self.gru = nn.GRU(
+                input_size=self.temporal_memory_dim,
+                hidden_size=gru_hidden_dim,
+                num_layers=1,
+                batch_first=True,
+            )
+        else:
+            self.gru = None
 
     def forward(self, obs, inference=False):
         """
@@ -351,7 +385,17 @@ class Model(nn.Module):
         # STAGE 4: 输出头
         # ====================================================================
         logits = self.actor_head(hidden)  # (batch, 16) - 动作 logits
-        value = self.critic_head(hidden)  # (batch, 1) - 价值估计
+        
+        # === 修改 Task F ===
+        # 支持双头critic模式
+        if self.critic_head is not None:
+            # 单头模式（默认）
+            value = self.critic_head(hidden)  # (batch, 1)
+        else:
+            # 双头模式
+            value_survival = self.value_survival(hidden)  # (batch, 1) - 生存价值
+            value_treasure = self.value_treasure(hidden)  # (batch, 1) - 宝藏价值
+            value = value_survival + value_treasure  # (batch, 1) - 总价值（向后兼容）
 
         return logits, value
 

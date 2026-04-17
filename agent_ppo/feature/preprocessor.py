@@ -985,6 +985,9 @@ class Preprocessor:
         # 获取英雄当前血量（用于动作质量评估）— 使用统一的提取函数
         hero_hp, _ = _extract_hero_hp_info(hero)
         
+        # 判断是否有buff加速（Priority 1 - Task A）
+        buff_active = buff_remain > 0.0
+        
         try:
             # 计算动作质量评估 (96D: 16 动作 × 6 维度)
             # 使用hero_pos_history (存储实际{x,z}位置) 而不是trajectory_history (存储coarse_cell)
@@ -1000,6 +1003,7 @@ class Preprocessor:
                 recent_positions=list(self.hero_pos_history) if self.hero_pos_history else None,
                 flash_cooldown=int(flash_cd),
                 danger_trend=self.danger_trend_value,
+                buff_active=buff_active,
             )
             reward_info["action_quality_computed"] = True
         except Exception as e:

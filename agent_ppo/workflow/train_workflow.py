@@ -219,17 +219,24 @@ class EpisodeRunner:
                     )
 
                 # Build sample frame / 构造样本帧
+                # === 修改 Task D ===
+                # 现在保存old_logprob和old_value用于PPO训练
                 frame = SampleData(
                     obs=np.array(obs_data.feature, dtype=np.float32),
                     legal_action=np.array(obs_data.legal_action, dtype=np.float32),
                     act=np.array([act_data.action[0]], dtype=np.float32),
+                    old_logprob=np.array([act_data.logprob], dtype=np.float32),
+                    old_value=np.array(act_data.value, dtype=np.float32).flatten()[:1],
                     reward=reward,
                     done=np.array([float(done)], dtype=np.float32),
-                    reward_sum=np.zeros(1, dtype=np.float32),
-                    value=np.array(act_data.value, dtype=np.float32).flatten()[:1],
-                    next_value=np.zeros(1, dtype=np.float32),
-                    advantage=np.zeros(1, dtype=np.float32),
-                    prob=np.array(act_data.prob, dtype=np.float32),
+                    next_obs=np.array(_obs_data.feature, dtype=np.float32) if not done else np.zeros_like(np.array(obs_data.feature, dtype=np.float32)),
+                    next_legal_action=np.array(_obs_data.legal_action, dtype=np.float32) if not done else np.zeros(16, dtype=np.float32),
+                    next_value=np.zeros(1, dtype=np.float32),  # 将在sample_process中填充
+                    advantage=np.zeros(1, dtype=np.float32),  # 将在sample_process中填充GAE
+                    return_=np.zeros(1, dtype=np.float32),  # 将在sample_process中填充
+                    reward_sum=np.zeros(1, dtype=np.float32),  # 兼容旧代码
+                    value=np.array(act_data.value, dtype=np.float32).flatten()[:1],  # 兼容旧代码
+                    prob=np.array(act_data.prob, dtype=np.float32),  # 采样时的概率
                 )
                 collector.append(frame)
 

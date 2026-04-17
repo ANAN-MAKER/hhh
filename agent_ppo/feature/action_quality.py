@@ -39,6 +39,9 @@ from agent_ppo.feature.spatial_utils import (
     action_is_flash,
 )
 
+# 导入真实动作仿真器（Priority 1 - Task A）
+from agent_ppo.feature.action_simulator import simulate_action
+
 
 # ============================================================================
 # 常数定义
@@ -93,6 +96,7 @@ class ActionQualityEvaluator:
         recent_positions: Optional[List[Dict]] = None,
         flash_cooldown: int = 0,
         danger_trend: float = 0.0,
+        buff_active: bool = False,
     ) -> np.ndarray:
         """
         评估所有 16 个动作的质量。
@@ -109,6 +113,7 @@ class ActionQualityEvaluator:
             recent_positions: 最近访问过的位置队列，用于检查重复
             flash_cooldown: 闪现冷却剩余步数
             danger_trend: 危险趋势指标 [-1, 1]，负数表示局势恶化
+            buff_active: 是否有buff加速（Priority 1 - Task A）
         
         Returns:
             (16, 6) 的 numpy 数组，表示 16 个动作的 6 维质量评估
@@ -132,6 +137,7 @@ class ActionQualityEvaluator:
                 recent_positions=recent_positions,
                 flash_cooldown=flash_cooldown,
                 danger_trend=danger_trend,
+                buff_active=buff_active,
             )
         
         return action_qualities
@@ -150,17 +156,38 @@ class ActionQualityEvaluator:
         recent_positions: Optional[List[Dict]],
         flash_cooldown: int,
         danger_trend: float,
+        buff_active: bool = False,
     ) -> np.ndarray:
         """
         评估单个动作的 6 个维度。
+        
+        使用真实动作仿真器（Priority 1 - Task A）
         
         返回 [safety_score, treasure_gain, buff_gain, terrain, revisit_penalty, flash_value]
         """
         # 如果不合法，该动作所有维度得分都偏低
         legal_factor = float(legal_action)
         
-        # 预测执行此动作后的新位置
-        next_pos = apply_action_to_pos(hero_pos, action_id, MAP_SIZE)
+        # 使用真实动作仿真器替代简单的apply_action_to_pos（Priority 1）
+        try:
+            action_result = simulate_action(
+                hero_pos=hero_pos,
+                action_id=action_id,
+                local_map=local_map,
+                buff_active=buff_active,
+                treasures=treasures if treasures else None,
+                buffs=buffs if buffs else None,
+            )
+            next_pos = action_result.get("flash_pos") if action_result.get("is_flash") else action_result.get("next_pos", hero_pos)
+            is_blocked = action_result.get("blocked", False)
+            collected_treasures = action_result.get("collected_treasures", 0)
+            collected_buffs = action_result.get("collected_buffs", 0)
+        except Exception as e:
+            # 降级到简单的apply_action_to_pos，确保不阻断训练
+            next_pos = apply_action_to_pos(hero_pos, action_id, MAP_SIZE)
+            is_blocked = False
+            collected_treasures = 0
+            collected_buffs = 0
         
         # 四个维度的评分
         safety_score = self._compute_safety_score(
@@ -168,15 +195,15 @@ class ActionQualityEvaluator:
         )
         
         treasure_gain_score = self._compute_treasure_gain_score(
-            hero_pos, next_pos, treasures, legal_factor
+            hero_pos, next_pos, treasures, legal_factor, collected_treasures
         )
         
         buff_gain_score = self._compute_buff_gain_score(
-            hero_pos, next_pos, buffs, legal_factor
+            hero_pos, next_pos, buffs, legal_factor, collected_buffs
         )
         
         terrain_score = self._compute_terrain_score(
-            action_id, next_pos, local_map, legal_factor
+            action_id, next_pos, local_map, legal_factor, is_blocked
         )
         
         revisit_penalty = self._compute_revisit_penalty(
@@ -253,14 +280,21 @@ class ActionQualityEvaluator:
         next_pos: Dict[str, float],
         treasures: List[Dict],
         legal_factor: float,
+        collected_treasures: int = 0,
     ) -> float:
         """
         宝箱收益分：执行动作后，是否更接近宝箱。
+        
+        在Priority 1中，增加了直接收集计数（Priority 1 - Task A）
         
         返回 [0, 1]，高分表示靠近宝箱。
         """
         if not treasures:
             return 0.0  # 没有宝箱，不算收益
+        
+        # 如果直接收集到宝箱，给予最高分
+        if collected_treasures > 0:
+            return float(legal_factor)
         
         # 计算到最近宝箱的距离变化
         min_dist_before = float('inf')
@@ -299,14 +333,21 @@ class ActionQualityEvaluator:
         next_pos: Dict[str, float],
         buffs: List[Dict],
         legal_factor: float,
+        collected_buffs: int = 0,
     ) -> float:
         """
         buff 收益分：执行动作后，是否更接近 buff。
+        
+        在Priority 1中，增加了直接收集计数（Priority 1 - Task A）
         
         返回 [0, 1]，高分表示靠近 buff。
         """
         if not buffs:
             return 0.0
+        
+        # 如果直接收集到buff，给予最高分
+        if collected_buffs > 0:
+            return float(legal_factor)
         
         # 类似宝箱的逻辑
         min_dist_before = float('inf')
@@ -340,12 +381,19 @@ class ActionQualityEvaluator:
         next_pos: Dict[str, float],
         local_map: Optional[np.ndarray],
         legal_factor: float,
+        is_blocked: bool = False,
     ) -> float:
         """
         地形开阔分：该方向是开阔还是容易卡住，判断方向的前进潜力。
         
+        在Priority 1中，使用真实仿真的is_blocked标志（Priority 1 - Task A）
+        
         返回 [0, 1]，高分表示地形开阔。
         """
+        # 如果动作被障碍阻挡，给予较低分
+        if is_blocked:
+            return 0.2 * legal_factor  # 动作被阻止，地形分较低
+        
         # 基础地形评分（从 spatial_utils 获取）
         direction_info = get_direction_ahead_in_local_map(action_id, local_map)
         openness = float(direction_info.get("openness", 0.5))
@@ -487,9 +535,12 @@ def compute_action_quality_features(
     recent_positions: Optional[List[Dict]] = None,
     flash_cooldown: int = 0,
     danger_trend: float = 0.0,
+    buff_active: bool = False,
 ) -> np.ndarray:
     """
     主导出函数：计算动作质量评估特征。
+    
+    在Priority 1中，增加了buff_active参数用于真实动作仿真（Priority 1 - Task A）
     
     返回 96D 的特征向量（16 动作 × 6 维）。
     """
@@ -508,6 +559,7 @@ def compute_action_quality_features(
         recent_positions=recent_positions,
         flash_cooldown=flash_cooldown,
         danger_trend=danger_trend,
+        buff_active=buff_active,
     )
     
     # Flatten 成 96D
