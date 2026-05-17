@@ -1,0 +1,86 @@
+现在应该保存 6000 步模型，暂停纯 Stage A 配置，继续做“鲁班 A+ 微调”。也就是：不是重训、不是放弃，而是从当前 checkpoint 继续把鲁班的跟兵线推进、残血击杀、技能命中、带兵推塔补起来。
+
+从曲线看，Stage A 已经起作用：胜率、episode_reward、经济、防御塔优势都在上升；但你的诊断也对，策略还停留在“会清兵、会普攻、会局部作战”，没有稳定形成“清兵 → 跟兵线前压 → 安全点塔 → 残血收割”的闭环。任务最终是摧毁对方防御塔，不只是赢局部换血或清兵，官方任务目标也是以推掉防御塔作为完成条件。
+
+现在暴露出的主要问题
+
+你图里的几个指标很典型：
+
+attack_action_rate 上升、creep_target_rate 上升，但 tower_target_rate 很低，说明模型更偏向“打小兵/打眼前目标”，没有把“兵线推进后的打塔”学成稳定动作。
+
+tower_risk 里 safe_push_window_rate 在上升，但 tower_attack_with_minion_rate 仍然很低，说明已经出现“可以推塔的窗口”，但策略没有利用窗口。
+
+hurt_to_hero 上升但 kill 不稳定，说明它会消耗敌方血量，但不会完成收割。这个阶段不是单纯“再训练很久”就一定能解决，因为 Stage A 的击杀、技能、追击信号太间接。
+
+鲁班下一步不要直接进 Stage B/D，而是做 A+
+
+Stage A 原方案只放基础奖励：血量、防御塔、经济、经验、补刀、死亡、击杀、前进、胜负；技能命中、追击、推塔辅助默认不做，这是为了避免一开始 reward 太复杂。
+但现在鲁班已经会基本动作，就可以加小权重、条件化的辅助项，而不是大改 reward。
+
+建议这样改：
+
+# 继续保留 Stage A 主体
+hp_point: 2.0
+tower_hp_point: 10.0 -> 12.0 或 15.0
+money: 0.008
+exp: 0.008
+last_hit: 0.5
+death: -1.0
+kill: 0.5 -> 1.0
+forward: 0.03
+win_or_lose: 3.0
+
+新增三个小项：
+
+# 1. 有安全推塔窗口时，鼓励攻击塔
+if safe_to_push and action_target == enemy_tower:
+    reward_push_assist += 0.02
+
+# 2. 清完兵后，鼓励跟随己方小兵向敌塔方向前进
+if ally_minion_ahead and not enemy_close_dangerous and move_toward_enemy_tower:
+    reward_lane_follow += 0.01
+
+# 3. 敌方残血且可见时，鼓励攻击/技能/召唤师技能指向敌方英雄
+if enemy_visible and enemy_hp_ratio < 0.30 and action_target == enemy_hero:
+    reward_finish += 0.02
+
+不要一上来加复杂技能空放惩罚。你现在的问题更像“目标选择和推塔时机没学出来”，不是单纯技能 reward 不够。原方案里 Stage C 的 safe_push_action_reward = +0.02、Stage D 的技能奖励默认关闭，本来就是等基础策略起来之后再逐步打开。
+
+技能弱的问题，先查这三项
+
+技能能力弱不一定是网络表达能力差，可能是动作头和 mask 学错了。官方动作空间是层次化的：先选 button，再选方向 how，再选目标 who；而 sub_action_mask 会根据 button 过滤 move、skill、target。
+
+重点检查：
+
+1. PPO loss 是否只计算有效动作头？
+
+例如普通攻击只算：
+
+button + target
+
+移动只算：
+
+button + move_x + move_z
+
+技能只算：
+
+button + skill_x + skill_z + target
+
+不要把所有 head 的 logprob 都加进 PPO loss，否则 skill_x、skill_z、move_x、move_z 会被大量无效动作污染。
+
+2. exploit 是否正确使用 legal_action + sub_action_mask？
+
+评估时不能只对每个 head 独立 argmax，要先确定 button，再用对应 button 的 mask 约束方向和目标。
+
+3. 召唤师技能不要随机选
+
+你当前代码里 init_config 是从所有召唤师技能里 random.choice，这会导致模型有时根本不是闪现，也不是终结。
+如果你现在要提升“残血收割”，建议先固定：
+
+summoner_skill_id = 80108  # 终结
+
+如果你专门训练“闪现追杀”，再固定：
+
+summoner_skill_id = 80115  # 闪现
+
+不要一边随机召唤师技能，一边期待模型稳定学会闪现追击。

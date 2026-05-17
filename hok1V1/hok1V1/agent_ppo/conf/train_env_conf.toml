@@ -1,0 +1,23 @@
+[monitor]
+# Monitor side: 0 blue camp, 1 red camp.
+monitor_side = 0
+
+# Keep this enabled so evaluation/monitoring can switch sides.
+auto_switch_monitor_side = true
+
+[episode]
+# Stage A+ trains Luban against the built-in rule AI.
+opponent_agent = "common_ai"
+
+# Evaluate against the previous Luban model during training.
+eval_interval = 5
+eval_opponent_type = "266689"
+
+# Fallback lineup for config parsing. train_workflow.py fixes Stage A+ to 112 vs 112.
+[[lineups.blue_camp]]
+# 112: Luban No.7, 133: Di Renjie
+hero_id = 112
+
+[[lineups.red_camp]]
+# 112: Luban No.7, 133: Di Renjie
+hero_id = 112
