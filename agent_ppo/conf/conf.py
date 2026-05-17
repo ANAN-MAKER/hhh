@@ -41,6 +41,20 @@ class GameConfig:
     TIME_SCALE_ARG: int = 0
     MAX_FRAME_NO: int = 20000
     NORMAL_TOWER_SUBTYPE: int = 21
+    ACTOR_TYPE_HERO: int = 0
+    ACTOR_TYPE_MONSTER: int = 1
+    ACTOR_TYPE_ORGAN: int = 2
+    SUB_TYPE_LANE_SOLDIER: int = 11
+    SUB_TYPE_TOWER: int = 21
+    SUB_TYPE_SPRING_TOWER: int = 23
+    SUB_TYPE_CRYSTAL: int = 24
+    RIVER_SPIRIT_CONFIG_ID: int = 6827
+    LANE_SOLDIER_CONFIG_IDS = {6800, 6801, 6802, 6803, 6804, 6805}
+    TOWER_CONFIG_IDS = {1111, 1112}
+    CRYSTAL_CONFIG_IDS = {1113, 1114}
+    SPRING_TOWER_CONFIG_IDS = {44, 46}
+    ORGAN_SUB_TYPES = {SUB_TYPE_TOWER, SUB_TYPE_SPRING_TOWER, SUB_TYPE_CRYSTAL}
+    ORGAN_CONFIG_IDS = TOWER_CONFIG_IDS | CRYSTAL_CONFIG_IDS | SPRING_TOWER_CONFIG_IDS
     SKILL_SLOT_TYPES: List[int] = [1, 2, 3, 5]
     HERO_ID_TO_INDEX: Dict[int, int] = {
         112: 0,
@@ -49,15 +63,18 @@ class GameConfig:
 
 
 class DebugConfig:
-    ENABLE_TRACE: bool = True
+    ENABLE_TRACE: bool = False
     TRACE_MODE: str = "all"
     TRACE_TOPK: int = 3
-    TRACE_FRAME_INTERVAL: int = 5
+    TRACE_FRAME_INTERVAL: int = 50
     TRACE_OUTPUT_DIR: str = "debug_traces"
-    ENABLE_TRACE_MONITOR: bool = True
+    ENABLE_TRACE_MONITOR: bool = False
     ATTACH_REAL_CMD: bool = True
     TRACE_MONITOR_INTERVAL_SECONDS: int = 30
     TRACE_LOG_INTERVAL_FRAMES: int = 20
+    TRACE_MAX_EPISODES: int = 3
+    TRACE_MAX_RECORDS: int = 2000
+    TRACE_MONITOR_SIDE_ONLY: bool = True
 
 
 class DimConfig:
@@ -103,6 +120,7 @@ class Config:
     IS_REINFORCE_TASK_LIST: List[bool] = [True, True, True, True, True, True]
     # The target branch is conditioned on the button branch, so its legal mask is flattened to 12 * 9 = 108.
     LEGAL_ACTION_DIM: int = sum(LABEL_SIZE_LIST)
+    RAW_LEGAL_ACTION_DIM: int = sum(LABEL_SIZE_LIST[:-1]) + LABEL_SIZE_LIST[0] * LABEL_SIZE_LIST[-1]
 
     # Sample layout used by FrameCollector and Algorithm:
     # feature+legal_action, reward, advantage, six action branches, six old probabilities,
@@ -115,7 +133,7 @@ class Config:
         + [LSTM_UNIT_SIZE, LSTM_UNIT_SIZE]
     )
     SERI_VEC_SPLIT_SHAPE: List[tuple] = [(FEATURE_DIM,), (LEGAL_ACTION_DIM,)]
-    INIT_LEARNING_RATE_START: float = 1e-3
+    INIT_LEARNING_RATE_START: float = 1e-4
     TARGET_LR: float = 1e-4
     TARGET_STEP: int = 5000
     BETA_START: float = 0.025
@@ -123,8 +141,8 @@ class Config:
 
     CLIP_PARAM: float = 0.2
     MIN_POLICY: float = 0.00001
-    PPO_EPOCHS: int = 4
-    PPO_MINIBATCH_SIZE: int = 128
+    PPO_EPOCHS: int = 1
+    PPO_MINIBATCH_SIZE: int = 512
     ADVANTAGE_NORM_EPS: float = 1e-8
 
     data_shapes: List[List[int]] = [
@@ -157,7 +175,7 @@ class Config:
     LEGAL_ACTION_SIZE_LIST: List[int] = LABEL_SIZE_LIST.copy()
     LEGAL_ACTION_SIZE_LIST[-1] = LEGAL_ACTION_SIZE_LIST[-1] * LEGAL_ACTION_SIZE_LIST[0]
 
-    GAMMA: float = 0.99
+    GAMMA: float = 0.997
     LAMDA: float = 0.95
 
     USE_GRAD_CLIP: bool = True

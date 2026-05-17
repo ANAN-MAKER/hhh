@@ -179,11 +179,20 @@ class GameRewardManager:
 
     def _is_normal_tower(self, npc):
         sub_type = npc.get("sub_type")
+        config_id = self._safe_int(npc.get("config_id"))
+        if config_id in GameConfig.TOWER_CONFIG_IDS:
+            return True
         if isinstance(sub_type, int):
-            return sub_type == GameConfig.NORMAL_TOWER_SUBTYPE
+            return sub_type == GameConfig.SUB_TYPE_TOWER
         if isinstance(sub_type, str):
             return "TOWER" in sub_type and "SPRING" not in sub_type
         return False
+
+    def _safe_int(self, value, default=-1):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
 
     def _empty_reward_dict(self):
         return {key: 0.0 for key in REWARD_KEYS}

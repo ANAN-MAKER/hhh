@@ -108,7 +108,12 @@ def build_frame(agent, observation) -> Frame:
     prob, value, action = act_data.prob, act_data.value, act_data.action
     lstm_cell, lstm_hidden = act_data.lstm_cell, act_data.lstm_hidden
 
-    legal_action = _update_legal_action(observation["legal_action"], action)
+    legal_action = _update_legal_action(
+        observation["legal_action"],
+        action,
+        frame_no=frame_no,
+        agent_id=getattr(agent, "player_id", "unknown"),
+    )
     frame = Frame(
         frame_no=frame_no,
         feature=feature_vec.reshape([-1]),
@@ -129,14 +134,37 @@ def build_frame(agent, observation) -> Frame:
 
 # Construct legal_action based on the actual action taken
 # 根据实际采用的action，构建legal_action
-def _update_legal_action(original_la, action):
+def _update_legal_action(original_la, action, frame_no="unknown", agent_id="unknown"):
     target_size = Config.LABEL_SIZE_LIST[-1]
     top_size = Config.LABEL_SIZE_LIST[0]
     original_la = np.array(original_la)
+    if original_la.shape[0] != Config.RAW_LEGAL_ACTION_DIM:
+        raise ValueError(
+            "raw legal_action length mismatch before compression: actual={0}, expected={1}, "
+            "frame_no={2}, agent_id/player_id={3}, label_size={4}".format(
+                original_la.shape[0],
+                Config.RAW_LEGAL_ACTION_DIM,
+                frame_no,
+                agent_id,
+                Config.LABEL_SIZE_LIST,
+            )
+        )
     fix_part = original_la[: -target_size * top_size]
     target_la = original_la[-target_size * top_size :]
     target_la = target_la.reshape([top_size, target_size])[action[0]]
-    return np.concatenate([fix_part, target_la], axis=0)
+    compressed = np.concatenate([fix_part, target_la], axis=0)
+    if compressed.shape[0] != Config.LEGAL_ACTION_DIM:
+        raise ValueError(
+            "compressed legal_action length mismatch: actual={0}, expected={1}, frame_no={2}, "
+            "agent_id/player_id={3}, label_size={4}".format(
+                compressed.shape[0],
+                Config.LEGAL_ACTION_DIM,
+                frame_no,
+                agent_id,
+                Config.LABEL_SIZE_LIST,
+            )
+        )
+    return compressed
 
 
 class FrameCollector:
@@ -230,9 +258,8 @@ class FrameCollector:
     def _format_data(self):
         sample_one_size = np.sum(self._data_shapes[:-2]) // self._LSTM_FRAME
         sample_lstm_size = np.sum(self._data_shapes[-2:])
-        sample_batch = np.zeros([self._LSTM_FRAME, sample_one_size])
-
         for i in range(self.num_agents):
+            sample_batch = np.zeros([self._LSTM_FRAME, sample_one_size])
             sample_lstm = np.zeros([sample_lstm_size])
             cnt = 0
             for j in self.rl_data_map[i]:
@@ -279,6 +306,7 @@ class FrameCollector:
                     # 将样本数组包装为 SampleData 对象
                     self.m_replay_buffer[i].append(SampleData(sample=sample_array))
                     sample_lstm = rl_info.lstm_info
+                    sample_batch = np.zeros([self._LSTM_FRAME, sample_one_size])
 
             # Pack remaining frames (zero-padded, masked by is_train=0)
             # 打包剩余帧（零填充，由 is_train=0 掩码）

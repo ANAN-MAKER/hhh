@@ -10,6 +10,7 @@ Author: Tencent AI Arena Authors
 
 from __future__ import annotations
 
+import os
 import random
 from typing import Any, Dict, List, Optional
 
@@ -73,6 +74,8 @@ class Agent(BaseAgent):
         self.player_id: int = 0
         self.debug_mode: str = "predict"
         self.debug_opponent_type: str = "unknown"
+        self.current_frame_no: int = -1
+        self._legal_action_debug_count: int = 0
 
         self.lr: float = Config.INIT_LEARNING_RATE_START
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr, betas=(0.9, 0.999), eps=1e-8)
@@ -96,11 +99,9 @@ class Agent(BaseAgent):
 
     def init_config(self, config_data: Dict[str, Any]) -> Dict[int, int]:
         my_heroes = config_data.get("my_heroes", [])
-        opponent_heroes = config_data.get("opponent_heroes", [])
         select_skills = {}
-        for my_hero_id, opponent_hero_id in zip(my_heroes, opponent_heroes):
-            skill_id = self._recommend_summoner_skill(my_hero_id, opponent_hero_id)
-            select_skills[my_hero_id] = skill_id
+        for my_hero_id in my_heroes:
+            select_skills[my_hero_id] = 80115
         return select_skills
 
     def _recommend_summoner_skill(self, my_hero_id: int, opponent_hero_id: int) -> int:
@@ -127,6 +128,7 @@ class Agent(BaseAgent):
         self.lstm_cell = np.zeros([self.lstm_unit_size], dtype=np.float32)
         self.reward_manager = GameRewardManager(self.player_id)
         self.feature_processes = FeatureProcess(self.hero_camp)
+        self._legal_action_debug_count = 0
         self.trace_writer.start_episode(observation, self.hero_camp, self.player_id)
 
     def _model_inference(self, list_obs_data: List[ObsData]) -> List[ActData]:
@@ -155,6 +157,7 @@ class Agent(BaseAgent):
 
         list_act_data = []
         for index in range(len(legal_action)):
+            self._validate_raw_legal_action(legal_action[index], log_probe=False)
             prob, d_prob, action, d_action, policy_debug = self._sample_masked_action(logits[index], legal_action[index])
             list_act_data.append(
                 ActData(
@@ -187,6 +190,8 @@ class Agent(BaseAgent):
         return action
 
     def observation_process(self, observation: Dict[str, Any]) -> ObsData:
+        self.current_frame_no = int(observation.get("frame_state", {}).get("frame_no", -1))
+        self._validate_raw_legal_action(observation["legal_action"], frame_no=self.current_frame_no)
         feature_packet = self.feature_processes.process_observation(observation)
         return ObsData(
             feature=feature_packet["feature_vector"],
@@ -217,6 +222,10 @@ class Agent(BaseAgent):
         if self.cur_model_name == model_file_path:
             self.logger.info(f"current model is {model_file_path}, so skip load model")
             return
+        if not os.path.exists(model_file_path):
+            if self.logger:
+                self.logger.warning(f"model {model_file_path} not found, use fresh initialized model")
+            return
 
         try:
             state_dict = torch.load(model_file_path, map_location=self.device)
@@ -244,6 +253,7 @@ class Agent(BaseAgent):
         self.lstm_hidden = act_data.lstm_hidden
 
     def _sample_masked_action(self, logits: np.ndarray, legal_action: List[int]) -> tuple:
+        self._validate_raw_legal_action(legal_action, log_probe=False)
         prob_list = []
         d_prob_list = []
         action_list = []
@@ -306,6 +316,36 @@ class Agent(BaseAgent):
         }
 
         return [prob_list], [d_prob_list], action_list, d_action_list, policy_debug
+
+    def _validate_raw_legal_action(
+        self,
+        legal_action: List[int],
+        frame_no: Optional[int] = None,
+        log_probe: bool = True,
+    ) -> None:
+        actual_len = len(legal_action)
+        expected_len = Config.RAW_LEGAL_ACTION_DIM
+        if frame_no is None:
+            frame_no = self.current_frame_no
+        if log_probe and self._legal_action_debug_count < 5:
+            if self.logger:
+                self.logger.info(
+                    f"raw legal_action length check: len={actual_len} expected={expected_len} "
+                    f"label_size={self.label_size_list} frame_probe={self._legal_action_debug_count + 1} "
+                    f"frame_no={frame_no} player_id={self.player_id}"
+                )
+            self._legal_action_debug_count += 1
+        if actual_len != expected_len:
+            raise ValueError(
+                "raw legal_action length mismatch: actual={0}, expected={1}, frame_no={2}, "
+                "agent_id/player_id={3}, label_size={4}".format(
+                    actual_len,
+                    expected_len,
+                    frame_no,
+                    self.player_id,
+                    self.label_size_list,
+                )
+            )
 
     def _legal_soft_max(self, input_hidden, legal_action):
         logits = torch.as_tensor(input_hidden, dtype=torch.float32)

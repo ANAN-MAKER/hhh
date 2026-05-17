@@ -412,8 +412,11 @@ class BattlefieldFeatureProcessor:
 
     def _is_normal_tower(self, npc):
         sub_type = npc.get("sub_type")
+        config_id = self._safe_int(npc.get("config_id"))
+        if config_id in GameConfig.TOWER_CONFIG_IDS:
+            return True
         if isinstance(sub_type, int):
-            return sub_type == GameConfig.NORMAL_TOWER_SUBTYPE
+            return sub_type == GameConfig.SUB_TYPE_TOWER
         if isinstance(sub_type, str):
             return "TOWER" in sub_type and "SPRING" not in sub_type
         return False
@@ -423,17 +426,42 @@ class BattlefieldFeatureProcessor:
             return False
         if self._is_organ_actor(npc):
             return False
-        if str(npc.get("sub_type", "")).upper().find("MONSTER") >= 0:
-            return False
-        return True
+        sub_type = npc.get("sub_type")
+        config_id = self._safe_int(npc.get("config_id"))
+        if isinstance(sub_type, int) and sub_type == GameConfig.SUB_TYPE_LANE_SOLDIER:
+            return True
+        if config_id in GameConfig.LANE_SOLDIER_CONFIG_IDS:
+            return True
+        return False
 
     def _is_organ_actor(self, npc):
         actor_type = npc.get("actor_type")
+        sub_type = npc.get("sub_type")
+        config_id = self._safe_int(npc.get("config_id"))
+        if config_id in GameConfig.ORGAN_CONFIG_IDS:
+            return True
+        if isinstance(sub_type, int) and sub_type in GameConfig.ORGAN_SUB_TYPES:
+            return True
         if isinstance(actor_type, str):
             return "ORGAN" in actor_type
         if isinstance(actor_type, int):
-            return actor_type == 3
+            return actor_type == GameConfig.ACTOR_TYPE_ORGAN
         return False
+
+    def _is_monster_actor(self, npc):
+        actor_type = npc.get("actor_type")
+        config_id = self._safe_int(npc.get("config_id"))
+        if config_id == GameConfig.RIVER_SPIRIT_CONFIG_ID:
+            return True
+        if isinstance(actor_type, int) and actor_type == GameConfig.ACTOR_TYPE_MONSTER:
+            return True
+        return str(npc.get("sub_type", "")).upper().find("MONSTER") >= 0
+
+    def _safe_int(self, value, default=-1):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
 
     def _alive_flag(self, unit):
         if unit is None:

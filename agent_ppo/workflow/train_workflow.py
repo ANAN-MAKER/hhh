@@ -33,7 +33,7 @@ def workflow(envs, agents, logger=None, monitor=None, *args, **kwargs):
         config_path="agent_ppo/conf/train_env_conf.toml",
         logger=logger,
     )
-    lineup_iterator = lineup_iterator_roundrobin_camp_heroes([112, 133])
+    lineup_iterator = lineup_iterator_roundrobin_camp_heroes([112])
 
     episode_runner = EpisodeRunner(
         env=envs[0],
@@ -256,17 +256,15 @@ class EpisodeRunner:
                 break
 
         hero_camp = main_hero.get("camp") if main_hero is not None else observation.get("player_camp")
-        enemy_tower_hp = 0.0
+        enemy_tower_hp = None
+        self_tower_hp = None
         for npc in frame_state.get("npc_states", []):
-            sub_type = npc.get("sub_type")
-            if isinstance(sub_type, int):
-                is_tower = sub_type == GameConfig.NORMAL_TOWER_SUBTYPE
+            if not self._is_normal_tower(npc):
+                continue
+            if npc.get("camp") == hero_camp:
+                self_tower_hp = float(npc.get("hp", 0))
             else:
-                sub_type_text = str(sub_type).upper()
-                is_tower = "TOWER" in sub_type_text and "SPRING" not in sub_type_text
-            if is_tower and npc.get("camp") != hero_camp:
                 enemy_tower_hp = float(npc.get("hp", 0))
-                break
 
         win = observation.get("win")
         if win is None:
@@ -283,9 +281,46 @@ class EpisodeRunner:
             "farming_reward": round(reward_detail_sum["farming_reward"], 4),
             "tempo_reward": round(reward_detail_sum["tempo_reward"], 4),
             "win_rate": round(win_rate, 4),
-            "enemy_tower_hp": round(enemy_tower_hp, 2),
             "frame": frame_no,
         }
+        if self_tower_hp is not None:
+            monitor_data["self_tower_hp"] = round(self_tower_hp, 2)
+        if enemy_tower_hp is not None:
+            monitor_data["enemy_tower_hp"] = round(enemy_tower_hp, 2)
+        if frame_no > 0 and main_hero is not None:
+            money_value = self._first_existing_value(main_hero, ("money", "money_cnt", "gold"))
+            if money_value is not None:
+                monitor_data["money_per_frame"] = round(float(money_value) / float(frame_no), 4)
+            if "kill_cnt" in main_hero:
+                monitor_data["kill"] = float(main_hero.get("kill_cnt", 0) or 0)
+            if "dead_cnt" in main_hero:
+                monitor_data["death"] = float(main_hero.get("dead_cnt", 0) or 0)
+            if "total_hurt_to_hero" in main_hero:
+                monitor_data["hurt_to_hero"] = round(float(main_hero.get("total_hurt_to_hero", 0) or 0), 2)
+            if "total_be_hurt_by_hero" in main_hero:
+                monitor_data["hurt_by_hero"] = round(float(main_hero.get("total_be_hurt_by_hero", 0) or 0), 2)
         if is_eval:
             monitor_data["reward"] = round(reward_sum, 4)
         return monitor_data
+
+    def _is_normal_tower(self, npc):
+        sub_type = npc.get("sub_type")
+        config_id = self._safe_int(npc.get("config_id"))
+        if config_id in GameConfig.TOWER_CONFIG_IDS:
+            return True
+        if isinstance(sub_type, int):
+            return sub_type == GameConfig.SUB_TYPE_TOWER
+        sub_type_text = str(sub_type).upper()
+        return "TOWER" in sub_type_text and "SPRING" not in sub_type_text
+
+    def _safe_int(self, value, default=-1):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _first_existing_value(self, payload, keys):
+        for key in keys:
+            if key in payload:
+                return payload.get(key)
+        return None

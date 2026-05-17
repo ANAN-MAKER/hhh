@@ -68,6 +68,9 @@ class DecisionTracer:
         self.trace_topk = max(1, int(DebugConfig.TRACE_TOPK))
         self.trace_interval = max(1, int(DebugConfig.TRACE_FRAME_INTERVAL))
         self.log_interval_frames = max(1, int(getattr(DebugConfig, "TRACE_LOG_INTERVAL_FRAMES", 20)))
+        self.max_episodes = max(0, int(getattr(DebugConfig, "TRACE_MAX_EPISODES", 0)))
+        self.max_records = max(0, int(getattr(DebugConfig, "TRACE_MAX_RECORDS", 0)))
+        self.total_record_count = 0
         self.last_monitor_report_time = 0.0
 
         self.current_mode = "predict"
@@ -93,6 +96,9 @@ class DecisionTracer:
 
     def start_episode(self, observation, hero_camp, player_id):
         if not self.trace_enabled:
+            return
+        if self._trace_limit_reached(next_episode=True):
+            self._disable_trace()
             return
 
         self.finalize_episode()
@@ -149,6 +155,9 @@ class DecisionTracer:
 
     def record(self, observation, obs_data, act_data, action, is_stochastic):
         if not self.trace_enabled:
+            return
+        if self._trace_limit_reached():
+            self._disable_trace()
             return
 
         self.current_mode = "predict" if is_stochastic else "exploit"
@@ -215,9 +224,13 @@ class DecisionTracer:
         self.pending_record = None
 
     def _write_record(self, record):
+        if self._trace_limit_reached():
+            self._disable_trace()
+            return
         if self.file_enabled and self.current_file is not None:
             self.current_file.write(json.dumps(record, ensure_ascii=False) + "\n")
             self.current_file.flush()
+        self.total_record_count += 1
 
         self._update_summary(record)
         self._update_window_stats(record)
@@ -307,6 +320,20 @@ class DecisionTracer:
         self.monitor.put_data({os.getpid(): metrics})
         self.window_stats = self._new_window_stats()
         self.last_monitor_report_time = now
+
+    def _trace_limit_reached(self, next_episode=False):
+        if self.max_records > 0 and self.total_record_count >= self.max_records:
+            return True
+        episode_count = self.current_episode + (1 if next_episode else 0)
+        return self.max_episodes > 0 and episode_count > self.max_episodes
+
+    def _disable_trace(self):
+        if self.current_file is not None:
+            self.current_file.close()
+            self.current_file = None
+        self.file_enabled = False
+        self.monitor_enabled = False
+        self.trace_enabled = False
 
     def _build_action_constraints(self, observation, policy_debug, action, selected_key):
         legal_action = observation.get("legal_action", [])
